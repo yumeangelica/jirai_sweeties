@@ -2,6 +2,7 @@ __pycache__/
 **/__pycache__/
 .env
 
+config/
 **/user_agents.txt
 
 .DS_Store
