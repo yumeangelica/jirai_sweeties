@@ -40,6 +40,51 @@ The project needs these configuration files in store_data_extractor/config/:
 - Must be created manually
 - Defines store URLs, HTML selectors, and update intervals
 
+Structure:
+```json
+[
+  {
+    "name": "store_name",
+    "options": {
+      "base_url": "store_url",
+      "site_main_url": "main_site_url",
+      "data_file": "previous_items_file.txt",
+      "item_container_class": "container_class",
+      "item_name_selector": "name_selector",
+      "item_price_selector": "price_selector",
+      "item_link_selector": "link_selector",
+      "sold_out_style": "sold_out_indicator",
+      "next_page_selector": "next_page_element",
+      "next_page_attribute": "attribute_name",
+      "delay_between_requests": "delay_in_seconds"
+    },
+    "schedule": {
+      "minutes": [list_of_minutes],
+      "hours": "* or list of hours",
+      "days": "* or list of days",
+      "months": "* or list of months",
+      "years": "* or list of years"
+    }
+  }
+]
+```
+
+Each store configuration contains:
+- `name`: Identifier for the store
+- `options`: Data extraction configuration
+  - `base_url`: Starting URL for data extraction
+  - `site_main_url`: Main website URL
+  - `data_file`: File to store previous items
+  - `item_container_class`: HTML class for item containers
+  - `item_name_selector`: Selector for item names
+  - `item_price_selector`: Selector for prices
+  - `item_link_selector`: Selector for item links
+  - `sold_out_style`: Style indicating sold out items
+  - `next_page_selector`: Element for pagination
+  - `next_page_attribute`: Attribute containing next page URL
+  - `delay_between_requests`: Time between requests in seconds
+- `schedule`: Monitoring schedule using cron-style patterns
+
 #### user_agents.txt (required)
 - List of browser user agents for web data extraction
 - Must be created manually
@@ -62,7 +107,7 @@ SQLite database is automatically created in the data directory, storing:
 - Python 3.13.0
 - Discord.py for bot functionality
 - SQLite3 for data storage
-- Beautiful Soup 4 for web scraping
+- Beautiful Soup 4 for web data extraction
 - aiohttp for async HTTP requests
 - Additional dependencies listed in requirements.txt
 
