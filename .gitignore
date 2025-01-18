@@ -1,0 +1,10 @@
+__pycache__/
+**/__pycache__/
+.env
+
+**/user_agents.txt
+
+.DS_Store
+venv/
+
+data/
