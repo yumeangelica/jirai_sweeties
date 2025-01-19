@@ -59,11 +59,11 @@ Structure:
       "delay_between_requests": "delay_in_seconds"
     },
     "schedule": {
-      "minutes": ["list_of_minutes"],
-      "hours": "* or list of hours",
-      "days": "* or list of days",
-      "months": "* or list of months",
-      "years": "* or list of years"
+      "minutes": "list of integer values for example [0, 30]",
+      "hours": "* or list of hours, for example [8, 12, 16]",
+      "days": "* or list of days, for example [1, 15]",
+      "months": "* or list of months, for example [1, 6, 12]",
+      "years": "* or list of years, for example [2025, 2026]"
     }
   }
 ]
