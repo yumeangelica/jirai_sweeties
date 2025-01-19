@@ -59,7 +59,7 @@ Structure:
       "delay_between_requests": "delay_in_seconds"
     },
     "schedule": {
-      "minutes": [list_of_minutes],
+      "minutes": ["list_of_minutes"],
       "hours": "* or list of hours",
       "days": "* or list of days",
       "months": "* or list of months",
