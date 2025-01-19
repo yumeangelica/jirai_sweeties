@@ -1,6 +1,12 @@
 # Jirai sweeties discord bot
 
-A custom Discord bot designed for the Jirai Sweeties server, combining chat functionality with automated store monitoring.
+A custom Discord bot designed for the Jirai sweeties server, combining chat functionality with automated store monitoring.
+
+## Project Information
+- **Version**: 1.0.0
+- **Author**: [yumeangelica](https://github.com/yumeangelica)
+- **License**: [CC BY-NC-ND 4.0](LICENSE.txt)
+- **Repository**: [Jirai sweeties](https://github.com/yumeangelica/jirai_sweeties)
 
 ## Project Overview
 
