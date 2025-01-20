@@ -66,7 +66,6 @@ class StoreDatabase:
     async def close_connection(self) -> None:
         """Close the database connection."""
         self.logger.info("Closing database connection...")
-        print("Closing database connection...")
         if self.conn:
             self.conn.close()
 
@@ -77,8 +76,9 @@ class StoreDatabase:
             # Check if the store already exists
             store_id = self.cursor.execute("SELECT id FROM Store WHERE name = ?", (name,)).fetchone()
             if store_id:
-                self.logger.info(f"Store '{name}' already exists in the database with ID {store_id[0]}.")
                 return store_id[0]
+
+            logging.info(f"Store '{name}' not found. Creating a new store...")
 
             # Create store if it doesn't exist
             self.cursor.execute("INSERT INTO Store (name) VALUES (?)", (name,))
@@ -160,7 +160,7 @@ class StoreDatabase:
             self.logger.error(f"An error occurred: {e}")
             return []
 
-    def get_products(self, store_name: str) -> list:
+    async def get_products(self, store_name: str) -> list:
         """Get all products for a store."""
         try:
             store_id: int = self.cursor.execute("SELECT id FROM Store WHERE name = ?", (store_name,)).fetchone()
@@ -168,8 +168,18 @@ class StoreDatabase:
                 self.logger.error(f"Store '{store_name}' not found.")
                 return []
             store_id: int = store_id[0]
-            products: list = self.cursor.execute("SELECT * FROM Product WHERE store_id = ?", (store_id,)).fetchall()
-            return products
+            products: list = self.cursor.execute("SELECT name, product_url, image_url, price_jpy, price_eur FROM Product WHERE store_id = ?", (store_id,)).fetchall()
+            product_list = []
+            for product in products:
+                name, product_url, image_url, price_jpy, price_eur = product
+                product_list.append({
+                    "name": name,
+                    "product_url": product_url,
+                    "image_url": image_url,
+                    "prices": {"JPY": price_jpy, "EUR": price_eur}
+                })
+
+            return product_list
         except self.conn.Error as e:
             self.logger.error(f"An error occurred: {e}")
             return []
@@ -248,7 +258,7 @@ class StoreDatabase:
                     store_name=store_name
                 )
                 if product_status == "new" and not initial_fetch:
-                    new_products.append((name, product_url, image_url, prices))
+                    new_products.append(item)
                 elif product_status == "error":
                     self.logger.error(f"Error adding/updating product: {product_url} for store {store_name}")
             except Exception as e:
