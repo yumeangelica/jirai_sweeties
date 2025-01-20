@@ -102,7 +102,7 @@ async def extract_items_by_config(soup, config) -> list:
                                 cleaned_price = match.group(0).replace(",", "")
                                 prices["JPY"] = float(cleaned_price)
                         except ValueError:
-                            print(f"Error parsing JPY price: {price_text}")
+                            logger.error(f"Error parsing JPY price: {price_text}")
 
                     # Process EUR prices
                     elif price_config["currency"] == "EUR":
@@ -112,7 +112,7 @@ async def extract_items_by_config(soup, config) -> list:
                                 cleaned_price = match.group(0).replace(",", "").replace(".", "")
                                 prices["EUR"] = float(cleaned_price) / 100  # Convert cents to euros
                         except ValueError:
-                            print(f"Error parsing EUR price: {price_text}")
+                            logger.error(f"Error parsing EUR price: {price_text}")
 
             # Add the item to the list if all required details are present
             if name and product_url and prices:
@@ -124,10 +124,9 @@ async def extract_items_by_config(soup, config) -> list:
                     "archived": archived
                 })
 
-        print(f"Extracted {len(items)} items.")
         return items
     except Exception as e:
-        print(f"Error extracting items: {e}")
+        logger.error(f"Error extracting items: {e}")
         return []
 
 
