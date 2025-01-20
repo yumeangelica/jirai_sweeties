@@ -3,7 +3,7 @@
 A custom Discord bot designed for the Jirai sweeties server, combining chat functionality with automated store monitoring.
 
 ## Project Information
-- **Version**: 1.0.0
+- **Version**: 1.1.0
 - **Author**: [yumeangelica](https://github.com/yumeangelica)
 - **License**: [CC BY-NC-ND 4.0](LICENSE.txt)
 - **Repository**: [Jirai sweeties](https://github.com/yumeangelica/jirai_sweeties)
@@ -54,7 +54,6 @@ Structure:
     "options": {
       "base_url": "store_url",
       "site_main_url": "main_site_url",
-      "data_file": "previous_items_file.txt",
       "item_container_class": "container_class",
       "item_name_selector": "name_selector",
       "item_price_selector": "price_selector",
@@ -80,7 +79,6 @@ Each store configuration contains:
 - `options`: Data extraction configuration
   - `base_url`: Starting URL for data extraction
   - `site_main_url`: Main website URL
-  - `data_file`: File to store previous items
   - `item_container_class`: HTML class for item containers
   - `item_name_selector`: Selector for item names
   - `item_price_selector`: Selector for prices
