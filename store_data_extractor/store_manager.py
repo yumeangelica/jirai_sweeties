@@ -7,6 +7,7 @@ import logging
 import os
 import json
 
+# Path to the stores configuration file
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "stores.json")
 
 store_config = None
@@ -95,10 +96,10 @@ class StoreManager:
         """Fetch and process store data, then notify DiscordBot."""
         try:
             async with SEMAPHORE: # Limit the number of concurrent requests
-                new_products = await main_program(self.session, store)
+                new_products = await main_program(self.session, store) # List of objects
 
-                # if new_products:
-                #     await discord_bot.send_store_update("developer", store['name'], new_products)
+                if new_products:
+                    await discord_bot.send_new_items(store['name_format'], new_products)
         except Exception as e:
             self.logger.error(f"Error fetching data for {store['name']}: {e}")
 
