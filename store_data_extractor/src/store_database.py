@@ -38,15 +38,18 @@ class StoreDatabase:
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS Store (
                                 id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-                                name TEXT NOT NULL
+                                name TEXT NOT NULL,
+                                initial_fetch TIMESTAMP DEFAULT NULL
                                 )""")
             self.cursor.execute("""
                                 CREATE TABLE IF NOT EXISTS Product (
                                 id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
                                 name TEXT NOT NULL,
-                                url TEXT NOT NULL,
-                                price REAL,
-                                archived BOOLEAN DEFAULT 0,
+                                product_url TEXT NOT NULL,
+                                image_url TEXT NOT NULL,
+                                price_jpy REAL,
+                                price_eur REAL,
+                                archived INTEGER DEFAULT 0,
                                 first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                 store_id INTEGER NOT NULL,
@@ -67,65 +70,85 @@ class StoreDatabase:
         if self.conn:
             self.conn.close()
 
+
     def add_store(self, name: str) -> int:
         """Add a store to the database if it doesn't exist and return the store ID."""
         try:
+            # Check if the store already exists
+            store_id = self.cursor.execute("SELECT id FROM Store WHERE name = ?", (name,)).fetchone()
+            if store_id:
+                self.logger.info(f"Store '{name}' already exists in the database with ID {store_id[0]}.")
+                return store_id[0]
+
             # Create store if it doesn't exist
-            self.cursor.execute("INSERT OR IGNORE INTO Store (name) VALUES (?)", (name,))
+            self.cursor.execute("INSERT INTO Store (name) VALUES (?)", (name,))
             self.conn.commit()
 
-            # Retrieve the store ID
+            # Retrieve the newly created store ID
             store_id = self.cursor.execute("SELECT id FROM Store WHERE name = ?", (name,)).fetchone()
-
             if not store_id:
-                self.logger.error(f"Store '{name}' not found.")
+                self.logger.error(f"Store '{name}' not found after insertion.")
                 return None
 
-            store_id: int = store_id[0]
-
-            return store_id
+            return store_id[0]
 
         except self.conn.Error as e:
             self.logger.error(f"An error occurred: {e}")
             self.conn.rollback()
             return None
 
-    async def add_or_update_product(self, name: str, url: str, price: float, store_name: str) -> None:
-        """Add or update a product in the database."""
+
+    async def add_or_update_product(self, name: str, product_url: str, image_url: str,
+                                price_jpy: float, price_eur: float, archived: bool, store_name: str) -> str:
+        """
+        Add or update a product in the database.
+
+        Returns:
+            str: "new" if the product was created,
+                "updated" if the product was updated,
+                "error" if an error occurred (e.g. store creation failed).
+        """
         async with self.db_lock:
             try:
-                # Get or create the store ID
-                store_id: int = self.add_store(store_name)
-
+                store_id: int = self.cursor.execute("SELECT id FROM Store WHERE name = ?", (store_name,)).fetchone()
                 if store_id is None:
-                    self.logger.error(f"Store '{store_name}' creation failed.")
-                    return
+                    self.logger.error(f"Store '{store_name}' not found.")
+                    return "error"
+                store_id: int = store_id[0]
 
-                # Check if the product exists by URL
+                # Check if product already exists
                 product = self.cursor.execute(
-                    "SELECT id, archived FROM Product WHERE url = ? AND store_id = ?",
-                    (url, store_id)
+                    "SELECT id FROM Product WHERE product_url = ? AND store_id = ?",
+                    (product_url, store_id)
                 ).fetchone()
 
                 if product:
-                    # Update existing product
-                    product_id, archived = product
+                    # Update existing product: set archived=0 (in case it was archived),
+                    product_id = product[0]
                     self.cursor.execute("""
                         UPDATE Product
-                        SET name = ?, price = ?, last_seen = ?, archived = 0
+                        SET name = ?, price_jpy = ?, price_eur = ?, image_url = ?, last_seen = ?, archived = 0
                         WHERE id = ?
-                    """, (name, price, datetime.now(), product_id))
+                    """, (name, price_jpy, price_eur, image_url, datetime.now(), product_id))
+                    self.conn.commit()
+                    return "updated"  # Product updated
                 else:
-                    # Add new product
-                    self.cursor.execute("""
-                        INSERT INTO Product (name, url, price, store_id, first_seen, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (name, url, price, store_id, datetime.now(), datetime.now()))
+                    archived_int = 1 if archived else 0 # Convert bool to int
 
-                self.conn.commit()
+                    # Insert new product
+                    self.cursor.execute("""
+                        INSERT INTO Product (name, product_url, image_url, price_jpy, price_eur, archived, store_id, first_seen, last_seen)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (name, product_url, image_url, price_jpy, price_eur, archived_int, store_id, datetime.now(), datetime.now()))
+                    self.conn.commit()
+
+                    if not archived:
+                        return "new"  # A new product was added
+
             except self.conn.Error as e:
                 self.logger.error(f"An error occurred: {e}")
                 self.conn.rollback()
+                return "error"
 
 
     def get_stores(self) -> list:
@@ -152,49 +175,86 @@ class StoreDatabase:
             return []
 
     async def update_and_archive_products(self, store_name: str, current_items: list) -> list:
-        """Update and archive products in the database."""
+        """
+        Update and archive products in the database.
+        1) Archives products that are no longer visible on the site.
+        2) Calls add_or_update_product for the current items.
+        Returns a list of newly added products (as tuples of (name, product_url)).
+        """
         store_id: int = self.add_store(store_name)
-
         if store_id is None:
             self.logger.error(f"Failed to find or create store {store_name}")
             return []
 
-        current_urls: set = {item[1] for item in current_items}
-        db_urls: list = self.cursor.execute(
-            "SELECT url FROM Product WHERE store_id = ? AND archived = 0",
+        # Check if this is the first fetch for the store and is not yet initialized aka None
+        initial_fetch: bool = self.cursor.execute(
+            "SELECT initial_fetch FROM Store WHERE id = ?", (store_id,)
+        ).fetchone()[0] is None
+
+        if initial_fetch:
+            # First fetch: update initial_fetch and skip new product notifications
+            self.cursor.execute(
+                "UPDATE Store SET initial_fetch = ? WHERE id = ?",
+                (datetime.now(), store_id)
+            )
+            self.conn.commit()
+            self.logger.info(f"First fetch for {store_name}. Skipping new product notifications.")
+
+        # Set of currently visible product URLs (from the site)
+        current_product_urls: set = {item["product_url"] for item in current_items}
+
+        # Get all non-archived product URLs from the DB
+        db_product_urls: list = self.cursor.execute(
+            "SELECT product_url FROM Product WHERE store_id = ? AND archived = 0",
             (store_id,)
         ).fetchall()
-        db_urls: set = {row[0] for row in db_urls}
+        db_product_urls: set = {row[0] for row in db_product_urls}
 
         # Archive products that are no longer visible
-        to_archive: set = db_urls - current_urls
-        for url in to_archive:
-            self.cursor.execute("UPDATE Product SET archived = 1 WHERE url = ?", (url,))
+        to_archive: set = db_product_urls - current_product_urls  # Set difference
+        for product_url in to_archive:
+            self.cursor.execute(
+                "UPDATE Product SET archived = 1 WHERE product_url = ? AND store_id = ?",
+                (product_url, store_id)
+            )
 
-        new_products: list = []  # List of new products
+        # Go through each current item and add or update
+        new_products: list = []
+        for item in current_items:
+            try:
+                # Extract product details
+                name = item.get("name", "").strip()
+                product_url = item.get("product_url", "").strip()
+                image_url = item.get("image_url", "").strip()
+                prices = item.get("prices", {})
+                archived = item.get("archived", False)
 
-        # Add or activate visible products
-        for name, url, price in current_items:
-            product: tuple = self.cursor.execute(
-                "SELECT id, name, price FROM Product WHERE url = ? AND store_id = ?",
-                (url, store_id)
-            ).fetchone()
+                # Force prices to float or set to None if unavailable
+                price_jpy = float(prices.get("JPY", 0)) if "JPY" in prices else None
+                price_eur = float(prices.get("EUR", 0)) if "EUR" in prices else None
 
-            if product:
-                # Product found, update details
-                product_id, existing_name, existing_price = product
-                if existing_name != name or existing_price != price:
-                    self.cursor.execute(
-                        "UPDATE Product SET archived = 0, last_seen = ? WHERE id = ?",
-                        (datetime.now(), product_id)
-                    )
-            else:
-                # Add new product
-                await self.add_or_update_product(name, url, price, store_name)
-                new_products.append((name, url))
+                if not name or not product_url:
+                    self.logger.warning(f"Skipping item with missing data: {item}")
+                    continue
+
+                # Add or update product in the database
+                product_status = await self.add_or_update_product(
+                    name=name,
+                    product_url=product_url,
+                    image_url=image_url,
+                    price_jpy=price_jpy,
+                    price_eur=price_eur,
+                    archived=archived,
+                    store_name=store_name
+                )
+                if product_status == "new" and not initial_fetch:
+                    new_products.append((name, product_url, image_url, prices))
+                elif product_status == "error":
+                    self.logger.error(f"Error adding/updating product: {product_url} for store {store_name}")
+            except Exception as e:
+                self.logger.error(f"Error processing item {item}: {e}")
 
         self.conn.commit()
-
         return new_products
 
 
@@ -208,7 +268,7 @@ class StoreDatabase:
 
         # Only new products have first_seen equal to last_seen
         new_products = self.cursor.execute("""
-            SELECT name, url FROM Product WHERE store_id = ? AND first_seen = last_seen
+            SELECT name, product_url FROM Product WHERE store_id = ? AND first_seen = last_seen
         """, (store_id,)).fetchall()
 
         return new_products
