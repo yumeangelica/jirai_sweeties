@@ -39,7 +39,6 @@ async def next_user_agent() -> str:
 
     # Get the current agent
     agent = user_agent_list[user_agent_index]
-    print(f"Using User-Agent: {agent}")
 
     # Increment index and wrap around
     user_agent_index += 1
