@@ -47,8 +47,12 @@ class DiscordBot(commands.Bot):
         bot_name = self.user.name.lower()
 
         if message.content.lower().startswith(f'{bot_name}:'):
-
             await message.channel.send(f"Hello {message.author.mention}! How can I help you today?")
+
+
+        if message.content.lower().startswith("!help"):
+            await self.show_help(message)
+            return
 
         await self.process_commands(message)
 
@@ -61,6 +65,18 @@ class DiscordBot(commands.Bot):
         )
 
         self.logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
+
+
+
+    def get_embed_color(self):
+        """Fetch and validate embed color from bot settings."""
+        embed_color = self.bot_settings.get('embed_color', (214, 140, 184))
+        if isinstance(embed_color, list) and len(embed_color) == 3:
+            return discord.Color.from_rgb(*embed_color)
+        else:
+            self.logger.warning("Invalid embed color in configuration, using default muted pink.")
+            return discord.Color.from_rgb(214, 140, 184)  # Default color
+
 
 
     async def send_new_items(self, store_name_format: str, new_products: list) -> None:
@@ -81,14 +97,9 @@ class DiscordBot(commands.Bot):
             if not new_products:
                 return
 
-            # Get the embed color from the configuration
-            embed_color = self.bot_settings.get('embed_color', (214, 140, 184))
 
-            if isinstance(embed_color, list) and len(embed_color) == 3:
-                embed_color = discord.Color.from_rgb(*embed_color)
-            else:
-                self.logger.warning("Invalid embed color in configuration, using default default color.")
-                embed_color = discord.Color.from_rgb(214, 140, 184)  # Default color, muted pink
+            # Fetch and validate embed color from settings
+            embed_color = self.get_embed_color()
 
             # Create the embed message for section title
             embed = discord.Embed(
@@ -175,3 +186,55 @@ class DiscordBot(commands.Bot):
         else:
             self.logger.warning("Welcome channel not found.")
 
+
+    async def show_help(self, message: discord.Message) -> None:
+        """Send a detailed help message to the user with commands and bot features."""
+
+        # Fetch and validate embed color from settings
+        embed_color = self.get_embed_color()
+
+        # Create the base embed for the help message
+        embed = discord.Embed(
+            title="Pien-chan bot - Commands & Features",
+            description="Here are the commands and features you can use to interact with me:",
+            color=embed_color
+        )
+
+        # Define available commands and their descriptions
+        commands = {
+            "!help": "Shows this help message."
+        }
+
+        # Define key bot features
+        features = {
+            "Real-time Updates": "Get notified about new items available in stores.",
+            "Welcome Messages": "Friendly messages for new members joining the server.",
+            "Custom Features": "I'm constantly learning new things, so stay tuned for updates!"
+        }
+
+        # Add commands to the embed
+        embed.add_field(
+            name="Commands:",
+            value="\n".join([f"**{cmd}**: {desc}" for cmd, desc in commands.items()]),
+            inline=False
+        )
+
+        # Add a visual separator with hearts
+        embed.add_field(
+            name="\u200B",  # Invisible field title
+            value="♡ ⋆ ♡ ⋆ ♡ ⋆ ♡ ⋆ ♡ ⋆ ♡ ⋆ ♡ ⋆ ♡ ⋆ ♡ ⋆ ♡",
+            inline=False
+        )
+
+        # Add features to the embed
+        embed.add_field(
+            name="Features:",
+            value="\n".join([f"**{feature}**: {desc}" for feature, desc in features.items()]),
+            inline=False
+        )
+
+        # Add final note to the embed
+        embed.set_footer(text="More commands and features coming soon! Stay tuned and send your suggestions to the suggestions channel. 💖")
+
+        # Send the embed as a message
+        await message.channel.send(embed=embed)
