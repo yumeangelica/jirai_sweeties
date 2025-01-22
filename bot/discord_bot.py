@@ -41,6 +41,11 @@ class DiscordBot(commands.Bot):
             self.bot_settings = json.load(f)
 
 
+    async def close_database(self) -> None:
+        """Close the database connection."""
+        await self.discord_db.close_connection()
+
+
     async def on_message(self, message: str) -> None:
         """Respond to messages that mention the bot."""
         if message.author == self.user:
