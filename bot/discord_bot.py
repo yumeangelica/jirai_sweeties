@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import random
+from bot.discord_database import DiscordDatabase
 
 # Path to the config directory
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config")
@@ -31,6 +32,7 @@ class DiscordBot(commands.Bot):
         self.ssl_context.check_hostname = True
 
         self.store_manager = store_manager # Store manager instance
+        self.discord_db = DiscordDatabase() # Discord database instance
         self.logger = logging.getLogger("DiscordBot") # Logger instance for the bot with the name "DiscordBot"
 
         self.lock = asyncio.Lock() # Async lock to prevent concurrent message sending
@@ -160,6 +162,11 @@ class DiscordBot(commands.Bot):
         guild = member.guild
         welcome_channel = None
 
+        user = await self.discord_db.get_user(member.id, member.name) # Check if user is already in the database
+
+        if not user:
+            await self.discord_db.add_user(member.id, member.name) # Add user to the database if not found
+
         # Load welcome messages list from the file
         welcome_messages = await self.load_welcome_messages()
 
@@ -174,6 +181,9 @@ class DiscordBot(commands.Bot):
 
         if welcome_channel:
             try:
+                if user: # In case of returning user
+                    await welcome_channel.send(f"Welcome back, {member.mention}! We're glad to see you again!")
+                    return
                 # Select a random welcome message and format it with the member mention
                 base_message = random.choice(welcome_messages)
                 welcome_message = base_message.format(member=member.mention)
