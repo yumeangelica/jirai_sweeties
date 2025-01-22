@@ -1,16 +1,18 @@
 from datetime import datetime
-from store_data_extractor.src.data_extractor import main_program
-from store_data_extractor.src.store_database import StoreDatabase
 import asyncio
 import aiohttp
 import logging
 import os
 import json
+from store_data_extractor.src.data_extractor import main_program
+from bot.discord_bot import DiscordBot
+from typing import Optional, List
+from store_data_extractor.types import StoreConfigDataType
 
 # Path to the stores configuration file
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "stores.json")
 
-store_config = None
+store_config: Optional[List[StoreConfigDataType]] = None
 with open(CONFIG_PATH, 'r') as f:
     store_config = json.load(f)
 
@@ -18,17 +20,20 @@ SEMAPHORE = asyncio.Semaphore(3) # Limit the number of concurrent requests
 
 class StoreManager:
     """Manage the stores and their data."""
-    def __init__(self):
-        self.stores = store_config
-        self.session = None # aiohttp session
+    def __init__(self) -> None:
+        self.stores: Optional[List[StoreConfigDataType]] = store_config
+        self.session = None
         self.logger = logging.getLogger("StoreManager")
-        self.db = StoreDatabase()
+        from store_data_extractor.src.store_database import StoreDatabase
+        self.db: StoreDatabase = StoreDatabase()
+
 
     async def start_session(self) -> None:
         """Start a new session."""
         self.logger.info("Starting session...")
         if not self.session:
-            self.session = aiohttp.ClientSession()
+            self.session: Optional[aiohttp.ClientSession] = aiohttp.ClientSession()
+
 
     async def stop_session(self) -> None:
         """Close the session."""
@@ -38,7 +43,8 @@ class StoreManager:
             self.session = None
         await self.db.close_connection() # Close the database connection
 
-    async def schedule_runner(self, discord_bot) -> None:
+
+    async def schedule_runner(self, discord_bot: DiscordBot) -> None:
         """Manage store updates based on schedule."""
         await self.start_session()
         try:
@@ -51,10 +57,10 @@ class StoreManager:
             logging.shutdown()
 
 
-    async def run_scheduled_tasks(self, discord_bot) -> None:
+    async def run_scheduled_tasks(self, discord_bot: DiscordBot) -> None:
         """Run the scheduled tasks for all stores."""
         tasks = []
-        for store in self.stores:
+        for store in self.stores: # type: ignore
             if await self.should_run_now(store):
                 self.logger.info(f"Scheduling task for {store['name']}")
                 tasks.append(asyncio.create_task(self.fetch_store_data(discord_bot, store)))
@@ -63,7 +69,8 @@ class StoreManager:
         if tasks:
             await asyncio.gather(*tasks)
 
-    async def should_run_now(self, store: dict) -> bool:
+
+    async def should_run_now(self, store: StoreConfigDataType) -> bool:
         """Check if the store should be updated now."""
 
         now = datetime.now()
@@ -92,7 +99,8 @@ class StoreManager:
 
         return True
 
-    async def fetch_store_data(self, discord_bot, store: dict) -> None:
+
+    async def fetch_store_data(self, discord_bot: DiscordBot, store: StoreConfigDataType) -> None:
         """Fetch and process store data, then notify DiscordBot."""
         try:
             async with SEMAPHORE: # Limit the number of concurrent requests
@@ -103,7 +111,8 @@ class StoreManager:
         except Exception as e:
             self.logger.error(f"Error fetching data for {store['name']}: {e}")
 
-    async def run_all_stores(self, discord_bot) -> None:
+
+    async def run_all_stores(self, discord_bot: DiscordBot) -> None:
         """Fetch data for all stores."""
-        for store in self.stores:
+        for store in self.stores: # type: ignore
             await self.fetch_store_data(discord_bot, store)
