@@ -6,8 +6,13 @@ import ssl
 import asyncio
 import json
 import os
+import sys
 import random
-from bot.discord_database import DiscordDatabase
+from typing import List, Optional, Dict
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+from bot.types import DiscordUserDataType, BotSettingsDataType
+from store_data_extractor.src.data_extractor import ProductDataType
 
 # Path to the config directory
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config")
@@ -20,7 +25,7 @@ WELCOME_MESSAGES_FILE_PATH = os.path.join(CONFIG_PATH, "welcome_messages.txt")
 
 class DiscordBot(commands.Bot):
     """Discord bot class to interact with the Discord API."""
-    def __init__(self, store_manager):
+    def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True # Enable the members intent for member join events
@@ -30,13 +35,14 @@ class DiscordBot(commands.Bot):
         self.ssl_context = ssl.create_default_context(cafile=certifi.where())
         self.ssl_context.verify_mode = ssl.CERT_REQUIRED
         self.ssl_context.check_hostname = True
-
-        self.store_manager = store_manager # Store manager instance
+        from store_data_extractor.store_manager import StoreManager # Lazy import to avoid circular imports
+        self.store_manager: StoreManager = StoreManager() # Store manager instance
+        from bot.discord_database import DiscordDatabase # Lazy import to avoid circular imports
         self.discord_db = DiscordDatabase() # Discord database instance
         self.logger = logging.getLogger("DiscordBot") # Logger instance for the bot with the name "DiscordBot"
 
         self.lock = asyncio.Lock() # Async lock to prevent concurrent message sending
-        self.bot_settings = None # Bot configuration settings
+        self.bot_settings: Optional[BotSettingsDataType] = None # Bot configuration settings
         with open(SETTINGS_FILE_PATH, 'r') as f:
             self.bot_settings = json.load(f)
 
@@ -46,12 +52,15 @@ class DiscordBot(commands.Bot):
         await self.discord_db.close_connection()
 
 
-    async def on_message(self, message: str) -> None:
+    async def on_message(self, message: discord.Message) -> None:
         """Respond to messages that mention the bot."""
         if message.author == self.user:
             return
 
-        bot_name = self.user.name.lower()
+        if self.user is None:
+            return
+
+        bot_name: str = self.user.name.lower()
 
         if message.content.lower().startswith(f'{bot_name}:'):
             await message.channel.send(f"Hello {message.author.mention}! How can I help you today?")
@@ -71,26 +80,35 @@ class DiscordBot(commands.Bot):
             activity=discord.CustomActivity(name="Welcoming new members and checking for new products from stores") # Set the bot activity
         )
 
+        if not self.user:
+            self.logger.error("Bot user not found.")
+            return
+
         self.logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
 
 
-
-    def get_embed_color(self):
+    def get_embed_color(self) -> discord.Color:
         """Fetch and validate embed color from bot settings."""
-        embed_color = self.bot_settings.get('embed_color', (214, 140, 184))
-        if isinstance(embed_color, list) and len(embed_color) == 3:
+
+        embed_color: List[int] = [214, 140, 184]
+        if self.bot_settings:
+            embed_color = self.bot_settings.get('embed_color', embed_color)
+        if len(embed_color) == 3:
             return discord.Color.from_rgb(*embed_color)
         else:
             self.logger.warning("Invalid embed color in configuration, using default muted pink.")
             return discord.Color.from_rgb(214, 140, 184)  # Default color
 
 
-
-    async def send_new_items(self, store_name_format: str, new_products: list) -> None:
+    async def send_new_items(self, store_name_format: str, new_products: List[ProductDataType]) -> None:
         """Send new products to a specific Discord channel."""
         async with self.lock: # Ensure only one task can send messages at a time
 
             new_items_channel = None # Channel to send new items
+
+            if not self.bot_settings:
+                self.logger.warning("Bot settings not found.")
+                return
 
             for channel in self.get_all_channels():
                 if isinstance(channel, discord.TextChannel) and self.bot_settings['new_items_channel_name'].lower() in channel.name.lower():
@@ -106,7 +124,7 @@ class DiscordBot(commands.Bot):
 
 
             # Fetch and validate embed color from settings
-            embed_color = self.get_embed_color()
+            embed_color: discord.Color = self.get_embed_color()
 
             # Create the embed message for section title
             embed = discord.Embed(
@@ -121,16 +139,26 @@ class DiscordBot(commands.Bot):
 
             # Send each product as a separate message
             for product in new_products:
-                name = product.get('name', 'No name available')
-                product_url = product.get('product_url', '#')
-                image_url = product.get('image_url', None)
-                prices = product.get('prices', {})
+                if product is None:
+                    continue
+                name: str = str(product.get('name', 'No name available'))
+                product_url: str = str(product.get('product_url', '#'))
+                image_url: str | None = str(product.get('image_url', None))
 
-                price_text = []
-                if prices.get('JPY'):
+                raw_prices = product.get("prices", {})
+                prices: Dict[str, float] = {}
+                if isinstance(raw_prices, dict):
+                    # Ensure all values in the dictionary are floats
+                    for key, value in raw_prices.items():
+                        if isinstance(value, (int, float)):
+                            prices[key] = float(value)
+
+                price_text: List[str] = []
+                if prices.get('JPY') is not None:
                     price_text.append(f"¥{prices['JPY']:,.0f}")
-                if prices.get('EUR'):
+                if prices.get('EUR') is not None:
                     price_text.append(f"€{prices['EUR']:.2f}")
+
 
                 price_str = " / ".join(price_text) if price_text else "No price available"
 
@@ -149,7 +177,7 @@ class DiscordBot(commands.Bot):
                 await asyncio.sleep(0.5)
 
 
-    async def load_welcome_messages(self) -> list[str]:
+    async def load_welcome_messages(self) -> List[str]:
         """Methdod to load welcome messages from a text file."""
         try:
             with open(WELCOME_MESSAGES_FILE_PATH, 'r', encoding='utf-8') as file:
@@ -167,7 +195,7 @@ class DiscordBot(commands.Bot):
         guild = member.guild
         welcome_channel = None
 
-        user = await self.discord_db.get_user(member.id, member.name) # Check if user is already in the database
+        user: Optional[DiscordUserDataType] = await self.discord_db.get_user(member.id, member.name) # Check if user is already in the database
 
         if not user:
             await self.discord_db.add_user(member.id, member.name) # Add user to the database if not found
@@ -178,6 +206,10 @@ class DiscordBot(commands.Bot):
         if not welcome_messages or len(welcome_messages) == 0:
             self.logger.warning("No welcome messages found from the file.")
             welcome_messages = [f"Welcome to the Jirai Sweeties server, {member.mention}! We're glad to have you here!"]
+
+        if not self.bot_settings:
+            self.logger.warning("Bot settings not found.")
+            return
 
         for channel in guild.text_channels:
             if self.bot_settings["welcome_channel_name"].lower() in channel.name.lower():

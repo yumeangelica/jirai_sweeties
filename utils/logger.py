@@ -1,16 +1,16 @@
 import logging
 
-def configure_logger():
+def configure_logger() -> logging.Logger:
     """
     Configure a root logger with a console handler and optional file handler.
     """
-    logger = logging.getLogger()  # Get the root logger
+    logger: logging.Logger = logging.getLogger()  # Get the root logger
     logger.setLevel(logging.DEBUG)  # Set global log level to DEBUG
 
     # Create console handler
-    console_handler = logging.StreamHandler()
+    console_handler: logging.Handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)  # Console shows INFO and above
-    console_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    console_formatter: logging.Formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     console_handler.setFormatter(console_formatter)
 
     # Add handlers if not already added
