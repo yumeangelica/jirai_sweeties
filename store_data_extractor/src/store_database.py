@@ -1,4 +1,4 @@
-from sqlite3 import connect, Error
+from sqlite3 import connect, Error, Row
 import os
 from datetime import datetime
 import asyncio
@@ -20,20 +20,22 @@ class StoreDatabase:
     """Manage the store data in an SQLite database."""
     def __init__(self):
         self.logger = logging.getLogger("StoreDatabase")
-        self.store_db_name = SQLITE_STORE_DB_FILE
+        self.store_db_file_name = SQLITE_STORE_DB_FILE
+        self.db_name = "Store Database"
         self.db_lock = asyncio.Lock()
 
         try:
-            self.conn = connect(self.store_db_name, isolation_level=None)
+            self.conn = connect(self.store_db_file_name, isolation_level=None)
+            self.conn.row_factory = Row
             self.cursor = self.conn.cursor()
             self.init_database()
-        except Error as e:
+        except self.conn.Error as e:
+            self.logger.error(f"Failed to connect to the database {self.db_name}")
             self.logger.error(f"An error occurred: {e}")
-            self.logger.error("Failed to initialize database.")
 
     def init_database(self) -> None:
         """Initialize the store database."""
-        self.logger.info("Initializing database...")
+        self.logger.info(f"Initializing database {self.db_name}...")
         try:
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS Store (
@@ -58,7 +60,8 @@ class StoreDatabase:
 
             self.conn.commit()
             self.logger.info("Database initialized successfully.")
-        except self.conn.Error as e:
+        except Error as e:
+            self.logger.error(f"Failing to initialize the database {self.db_name}")
             self.logger.error(f"An error occurred: {e}")
             self.conn.rollback()
             return
@@ -155,7 +158,7 @@ class StoreDatabase:
         """Get all stores from the database."""
         try:
             stores: list = self.cursor.execute("SELECT * FROM Store").fetchall()
-            return stores
+            return [dict(store) for store in stores] # Convert to list of dictionaries
         except self.conn.Error as e:
             self.logger.error(f"An error occurred: {e}")
             return []
@@ -163,23 +166,14 @@ class StoreDatabase:
     async def get_products(self, store_name: str) -> list:
         """Get all products for a store."""
         try:
-            store_id: int = self.cursor.execute("SELECT id FROM Store WHERE name = ?", (store_name,)).fetchone()
-            if store_id is None:
+            store: int = self.cursor.execute("SELECT id FROM Store WHERE name = ?", (store_name,)).fetchone()
+            if store is None:
                 self.logger.error(f"Store '{store_name}' not found.")
                 return []
-            store_id: int = store_id[0]
+            store_id: int = store["id"]
             products: list = self.cursor.execute("SELECT name, product_url, image_url, price_jpy, price_eur FROM Product WHERE store_id = ?", (store_id,)).fetchall()
-            product_list = []
-            for product in products:
-                name, product_url, image_url, price_jpy, price_eur = product
-                product_list.append({
-                    "name": name,
-                    "product_url": product_url,
-                    "image_url": image_url,
-                    "prices": {"JPY": price_jpy, "EUR": price_eur}
-                })
 
-            return product_list
+            return [dict(product) for product in products]  # Convert to list of dictionaries
         except self.conn.Error as e:
             self.logger.error(f"An error occurred: {e}")
             return []
@@ -270,18 +264,18 @@ class StoreDatabase:
 
     def get_new_products(self, store_name: str) -> list:
         """Get new products that have not been updated since first seen."""
-        store_id = self.cursor.execute("SELECT id FROM Store WHERE name = ?", (store_name,)).fetchone()
-        if store_id is None:
+        store = self.cursor.execute("SELECT id FROM Store WHERE name = ?", (store_name,)).fetchone()
+        if store is None:
             self.logger.error(f"Store '{store_name}' not found.")
             return []
-        store_id: int = store_id[0]
+        store_id: int = store["id"]
 
         # Only new products have first_seen equal to last_seen
         new_products = self.cursor.execute("""
             SELECT name, product_url FROM Product WHERE store_id = ? AND first_seen = last_seen
         """, (store_id,)).fetchall()
 
-        return new_products
+        return [dict(product) for product in new_products]  # Convert to list of dictionaries
 
     def delete_store(self, store_name: str) -> None:
         """Delete a store and its products from the database."""

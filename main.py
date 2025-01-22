@@ -35,4 +35,11 @@ async def main():
         logger.error(f"An error occurred: {e}")
         return
     finally:
-        store_task.cancel()
+        logger.info("Shutting down...")
+
+        # Cancel the store task if running
+        if store_task and not store_task.cancelled():
+            store_task.cancel()
+
+        # Close the bot database connection
+        await bot.close_database()
