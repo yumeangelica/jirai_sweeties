@@ -11,8 +11,8 @@ import random
 from typing import List, Optional, Dict
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from bot.types import DiscordUserDataType, BotSettingsDataType
-from store_data_extractor.src.data_extractor import ProductDataType
+from bot.discord_types import DiscordUserDataType, BotSettingsDataType
+from store_data_extractor.store_types import ProductDataType
 
 # Path to the config directory
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config")

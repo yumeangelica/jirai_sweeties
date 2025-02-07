@@ -7,7 +7,7 @@ import json
 from store_data_extractor.src.data_extractor import main_program
 from bot.discord_bot import DiscordBot
 from typing import Optional, List
-from store_data_extractor.types import StoreConfigDataType
+from store_data_extractor.store_types import StoreConfigDataType
 
 # Path to the stores configuration file
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "stores.json")
@@ -18,6 +18,9 @@ with open(CONFIG_PATH, 'r') as f:
 
 SEMAPHORE = asyncio.Semaphore(3) # Limit the number of concurrent requests
 
+# Import the global instance instead of the class
+from store_data_extractor.src.user_agent_manager import user_agent_manager
+
 class StoreManager:
     """Manage the stores and their data."""
     def __init__(self) -> None:
@@ -26,7 +29,9 @@ class StoreManager:
         self.logger = logging.getLogger("StoreManager")
         from store_data_extractor.src.store_database import StoreDatabase
         self.db: StoreDatabase = StoreDatabase()
-
+        self.user_agent_manager = user_agent_manager # only one instance of UserAgentManager, prevent multiple instances
+        self._shutdown_event = asyncio.Event() # Event to signal shutdown
+        self.current_tasks: List[asyncio.Task] = []
 
     async def start_session(self) -> None:
         """Start a new session."""
@@ -48,11 +53,19 @@ class StoreManager:
         """Manage store updates based on schedule."""
         await self.start_session()
         try:
-            while True:
+            while not self._shutdown_event.is_set():
                 await self.run_scheduled_tasks(discord_bot)
-                await asyncio.sleep(60)  # Scheduling interval
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=60)
+                except asyncio.TimeoutError:
+                    continue  # Normal timeout, continue with next iteration
+        except asyncio.CancelledError:
+            self.logger.warning("Schedule runner task was cancelled.")
+        except Exception as e:
+            self.logger.error(f"Error in schedule runner: {e}")
         finally:
             await self.stop_session()
+            await self.graceful_shutdown()
             await asyncio.sleep(0.1)
             logging.shutdown()
 
@@ -101,15 +114,51 @@ class StoreManager:
 
 
     async def fetch_store_data(self, discord_bot: DiscordBot, store: StoreConfigDataType) -> None:
-        """Fetch and process store data, then notify DiscordBot."""
-        try:
-            async with SEMAPHORE: # Limit the number of concurrent requests
-                new_products = await main_program(self.session, store) # List of objects
+        """Fetch and process store data with improved error handling."""
+        async with SEMAPHORE:
+            try:
+                task = asyncio.current_task()
+                if task:
+                    self.current_tasks.append(task)
 
+                new_products = await main_program(self.session, store)
                 if new_products:
                     await discord_bot.send_new_items(store['name_format'], new_products)
-        except Exception as e:
-            self.logger.error(f"Error fetching data for {store['name']}: {e}")
+
+            except asyncio.CancelledError:
+                self.logger.warning(f"Task cancelled for {store['name']}")
+                raise
+            except Exception as e:
+                self.logger.error(f"Error fetching data for {store['name']}: {e}")
+            finally:
+                try:
+                    await self.user_agent_manager.save_index_after_task(force=True)
+                except Exception as e:
+                    self.logger.error(f"Failed to save user agent index: {e}")
+
+                # Remove the task from the current tasks list
+                task = asyncio.current_task()
+                if task and task in self.current_tasks:
+                    self.current_tasks.remove(task)
+
+    async def graceful_shutdown(self) -> None:
+        """Initiate graceful shutdown of all operations."""
+        if self._shutdown_event.is_set():
+            return
+
+        self._shutdown_event.set()
+        self.logger.info("Initiating graceful shutdown...")
+
+        # Cancel and wait for current tasks to complete
+        for task in self.current_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        await self.stop_session()
 
 
     async def run_all_stores(self, discord_bot: DiscordBot) -> None:

@@ -7,8 +7,8 @@ import logging
 from typing import Optional
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__))) # Add the project root directory to the path
-from utils.data_directory_helper import ensure_directory_exists
-from bot.types import DiscordUserDataType
+from utils.helpers import ensure_directory_exists
+from bot.discord_types import DiscordUserDataType
 
 # Get to the root directory
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..')) # Root project directory

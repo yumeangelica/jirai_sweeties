@@ -3,7 +3,7 @@
 A custom Discord bot designed for the Jirai sweeties server, combining chat functionality with automated store monitoring and real-time notifications for server members.
 
 ## Project Information
-- **Version**: 1.6.0
+- **Version**: 1.7.0
 - **Author**: [yumeangelica](https://github.com/yumeangelica)
 - **License**: [CC BY-NC-ND 4.0](LICENSE.txt)
 - **Repository**: [Jirai sweeties](https://github.com/yumeangelica/jirai_sweeties)

@@ -15,32 +15,27 @@ class StoreOptionsDataType(TypedDict):
     delay_between_requests: int
     encoding: str
 
-
 class StoreConfigDataType(TypedDict):
     name: str
     name_format: str
     options: StoreOptionsDataType
     schedule: Dict[str, Union[List[int], str]]
 
-
 class StoreDataType(TypedDict):
     id: int
     name: str
     initial_fetch: Optional[str]
 
-
 class ProductPricesDataType(TypedDict, total=False):
     JPY: Optional[float]
     EUR: Optional[float]
-
 
 class ProductBaseDataType(TypedDict):
     name: str
     product_url: str
     image_url: Optional[str]
     prices: ProductPricesDataType
-    archived: bool
-
 
 class ProductDataType(ProductBaseDataType, total=False):
     id: Optional[int]
+    archived: Optional[bool]
