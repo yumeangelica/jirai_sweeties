@@ -4,7 +4,7 @@ A custom Discord bot designed for the Jirai sweeties server, combining chat func
 
 ## Project Information
 
-- **Version**: 1.7.1
+- **Version**: 1.7.2
 - **Author**: [yumeangelica](https://github.com/yumeangelica)
 - **License**: [CC BY-NC-ND 4.0](LICENSE.txt)
 - **Repository**: [Jirai sweeties](https://github.com/yumeangelica/jirai_sweeties)
@@ -123,7 +123,7 @@ settings.json
 ```json
 {
   "new_items_channel_name": "channel_name_for_new_items",
-  "embed_color": [R, G, B],
+  "embed_color": "list of rgb values in format [R, G, B]",
   "welcome_channel_name": "channel_name_for_welcome_messages"
 }
 ```
