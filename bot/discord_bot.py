@@ -100,7 +100,7 @@ class DiscordBot(commands.Bot):
             return discord.Color.from_rgb(214, 140, 184)  # Default color
 
 
-    async def send_new_items(self, store_name_format: str, new_products: List[ProductDataType]) -> None:
+    async def send_new_items(self, store_name_format: str, unsent_products: List[ProductDataType], context: str) -> None:
         """Send new products to a specific Discord channel."""
         async with self.lock: # Ensure only one task can send messages at a time
 
@@ -119,18 +119,22 @@ class DiscordBot(commands.Bot):
                 self.logger.warning(f"Channel '{self.bot_settings['new_items_channel_name']}' not found.")
                 return
 
-            if not new_products:
+            if not unsent_products:
                 return
 
 
             # Fetch and validate embed color from settings
             embed_color: discord.Color = self.get_embed_color()
 
+            # if context is not "unsent" then it is context
+            title = f"Products from {store_name_format}!" if context == "unsent" else f'{context.capitalize()} products from {store_name_format}!'
+            description = f"Found {len(unsent_products)} items"
+            color = embed_color
             # Create the embed message for section title
             embed = discord.Embed(
-                title=f"New products from {store_name_format}!",
-                description=f"Found {len(new_products)} new items",
-                color=embed_color
+                title=title,
+                description=description,
+                color=color
             )
 
             # Send section title
@@ -138,9 +142,12 @@ class DiscordBot(commands.Bot):
             await asyncio.sleep(0.5)
 
             # Send each product as a separate message
-            for product in new_products:
-                if product is None:
+            for product in unsent_products:
+                product_id = str(product.get('id', None))
+                if product is None or product_id == None:
+                    self.logger.warning(f"Product ID is None for product: {product}, cannot send product")
                     continue
+                product_id = int(product_id)
                 name: str = str(product.get('name', 'No name available'))
                 product_url: str = str(product.get('product_url', '#'))
                 image_url: str | None = str(product.get('image_url', None))
@@ -171,8 +178,10 @@ class DiscordBot(commands.Bot):
                 if image_url:
                     embed.set_image(url=image_url)  # Set the product image
 
+
                 await new_items_channel.send(embed=embed) # Send the message with the product details and image
 
+                await self.store_manager.db.mark_product_as_sent(product_id)
                 # Wait 0.5 sec between messages
                 await asyncio.sleep(0.5)
 
