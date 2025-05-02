@@ -7,7 +7,7 @@ import json
 from store_data_extractor.src.data_extractor import main_program
 from bot.discord_bot import DiscordBot
 from typing import Optional, List
-from store_data_extractor.store_types import StoreConfigDataType
+from store_data_extractor.store_types import StoreConfigDataType, ProductDataType
 
 # Path to the stores configuration file
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "stores.json")
@@ -113,17 +113,33 @@ class StoreManager:
         return True
 
 
+    async def fetch_unsent_products(self) -> Optional[List[ProductDataType]]:
+        """fetch unsent products from the database."""
+        products = await self.db.get_unsent_products()
+        if not products or len(products) == 0:
+            return None
+        return products
+
+
     async def fetch_store_data(self, discord_bot: DiscordBot, store: StoreConfigDataType) -> None:
         """Fetch and process store data with improved error handling."""
+        unsent_products = await self.fetch_unsent_products()
+        if unsent_products is not None:
+            await discord_bot.send_new_items(store['name_format'], unsent_products, "unsent")
+
         async with SEMAPHORE:
             try:
                 task = asyncio.current_task()
                 if task:
                     self.current_tasks.append(task)
 
-                new_products = await main_program(self.session, store)
+                result = await main_program(self.session, store)
+                new_products, updated_products = result
+
                 if new_products:
-                    await discord_bot.send_new_items(store['name_format'], new_products)
+                    await discord_bot.send_new_items(store['name_format'], new_products, "new")
+                if updated_products:
+                    await discord_bot.send_new_items(store['name_format'], updated_products, "updated")
 
             except asyncio.CancelledError:
                 self.logger.warning(f"Task cancelled for {store['name']}")
