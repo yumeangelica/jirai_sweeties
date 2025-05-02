@@ -1,4 +1,4 @@
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Tuple
 import random
 from lxml import html
 from datetime import datetime
@@ -109,7 +109,7 @@ def parse_product_details(product, config) -> Optional[ProductDataType]:
             "image_url": image_url,
             "prices": prices,
             "archived": False
-        } if name and product_url and prices else None
+        } if (name and product_url and image_url and prices) else None
 
     except Exception as e:
         logger.error(f"Error parsing product details: {e}")
@@ -153,30 +153,33 @@ async def compare_with_database(store_name: str, current_urls: set[str]) -> set[
         logger.error(f"Error comparing products with database: {e}")
         return set()
 
-async def process_items(store_name: str, current_items: List[ProductDataType]) -> List[ProductDataType]:
+async def process_items(store_name: str, current_items: List[ProductDataType]) -> Tuple[List[ProductDataType], List[ProductDataType]]:
     """Save the items to the database and check for changes."""
     try:
-        new_products: List[ProductDataType] = await db.sync_store_products(store_name, current_items)
-        if not new_products:
-            logger.info(f"No new items found in {store_name}")
-            return []
-        return new_products
+        result = await db.sync_store_products(store_name, current_items)
+        new_products: List[ProductDataType]
+        updated_products: List[ProductDataType]
+        new_products, updated_products = result
+        return new_products, updated_products
     except Exception as e:
         logger.error(f"Error processing items for {store_name}: {e}")
-        return []
+        return [], []
 
-async def process_batch(store_name: str, items: List[ProductDataType], context: str = "") -> List[ProductDataType]:
+async def process_batch(store_name: str, items: List[ProductDataType], context: str = "") -> Tuple[List[ProductDataType], List[ProductDataType]]:
     """Process a batch of items with error handling."""
     if not items:
-        return []
+        return [], []
     try:
-        new_products = await process_items(store_name, items)
+        result = await process_items(store_name, items)
+        new_products, updated_products = result
         if new_products:
-            logger.info(f"Successfully processed batch of {len(items)} items{' ' + context if context else ''}")
-        return new_products
+            logger.info(f"Found {len(new_products)} new items{' ' + context if context else ''}")
+        if updated_products:
+            logger.info(f"Updated {len(updated_products)} items{' ' + context if context else ''}")
+        return new_products, updated_products
     except Exception as e:
         logger.error(f"Error processing batch{' ' + context if context else ''}: {e}")
-        return []
+        return [], []
 
 async def get_next_page_url_by_config(tree: html.HtmlElement, store: StoreOptionsDataType) -> Optional[str]:
     """Identify the URL of the last 'Next' button based on the site configuration."""
@@ -193,13 +196,14 @@ async def get_next_page_url_by_config(tree: html.HtmlElement, store: StoreOption
         logger.error(f"Error finding next page for {store['base_url']}: {e}")
         return None
 
-async def main_program(session: Optional[ClientSession], store: StoreConfigDataType) -> List[ProductDataType]:
+async def main_program(session: Optional[ClientSession], store: StoreConfigDataType) -> Tuple[List[ProductDataType], List[ProductDataType]]:
     """Main program to fetch and process data for a store."""
     url = store['options']['base_url']
     logger.info(f'Fetching data for {store["name"]} from {url} at {datetime.now()}')
 
     all_product_urls: set[str] = set()
     all_new_products: List[ProductDataType] = []
+    all_updated_products: List[ProductDataType] = []
     visited_urls = set()
 
     try:
@@ -233,9 +237,12 @@ async def main_program(session: Optional[ClientSession], store: StoreConfigDataT
 
                 if page_items:
                     # Update products for this page immediately
-                    new_products = await process_batch(store["name"], page_items, "from current page")
+                    result = await process_batch(store["name"], page_items, "from current page")
+                    new_products, updated_products = result
                     if new_products:
                         all_new_products.extend(new_products)
+                    if updated_products:
+                        all_updated_products.extend(updated_products)
 
                     # Collect URLs for final comparison
                     page_urls = {item["product_url"] for item in page_items}
@@ -270,10 +277,15 @@ async def main_program(session: Optional[ClientSession], store: StoreConfigDataT
 
     except Exception as e:
         logger.error(f"Critical error in main_program for {store['name']}: {e}")
-        # Don't return here, let the finally block handle the return
 
     finally:
         # Always return any new products we found, even if there were errors
+        if not all_new_products:
+            logger.info(f"No new products found for {store['name']}")
+        if not all_updated_products:
+            logger.info(f"No updated products found for {store['name']}")
         if all_new_products:
-            logger.info(f"Returning {len(all_new_products)} new products (including any found before errors)")
-        return all_new_products
+            logger.info(f"Returning {len(all_new_products)} new products for {store['name']} (including any found before errors)")
+        if all_updated_products:
+            logger.info(f"Returning {len(all_updated_products)} updated products for {store['name']} (including any found before errors)")
+        return all_new_products, all_updated_products
