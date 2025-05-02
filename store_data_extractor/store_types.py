@@ -37,5 +37,5 @@ class ProductBaseDataType(TypedDict):
     prices: ProductPricesDataType
 
 class ProductDataType(ProductBaseDataType, total=False):
-    id: Optional[int]
+    id: int
     archived: Optional[bool]
