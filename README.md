@@ -4,7 +4,7 @@ A custom Discord bot designed for the Jirai sweeties server, combining chat func
 
 ## Project Information
 
-- **Version**: 1.8.2
+- **Version**: 1.8.3
 - **Author**: [yumeangelica](https://github.com/yumeangelica)
 - **License**: [CC BY-NC-ND 4.0](LICENSE.txt)
 - **Repository**: [Jirai sweeties](https://github.com/yumeangelica/jirai_sweeties)
@@ -25,6 +25,10 @@ This project consists of two main components:
 - Product tracking and price change detection
 - New item notifications
 - Database storage for historical data
+
+### Deployment Environment
+
+The bot is containerized using Docker and currently runs locally on a Raspberry Pi device with Linux, providing a cost-effective and energy-efficient hosting solution.
 
 ## Technical Implementation
 
