@@ -1,0 +1,11 @@
+services:
+  discord-bot:
+    build:
+      context: .
+    container_name: discord-bot
+    volumes:
+      - ./data:/app/data  # Mount local 'data' directory to '/app/data' in the container
+    env_file:
+      - .env  # Load environment variables from .env file
+    restart: unless-stopped  # Restart the container unless it is explicitly stopped
+    platform: linux/arm64  # Target platform for Raspberry Pi 3 B with 64-bit kernel

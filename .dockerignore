@@ -8,3 +8,5 @@ __pycache__/
 .DS_Store
 **/*.DS_Store
 README.md
+data/
+raspberry_deploy.sh
