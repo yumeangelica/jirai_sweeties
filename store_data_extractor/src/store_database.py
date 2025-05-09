@@ -1,5 +1,5 @@
 from sqlite3 import connect, Error, Row
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import os
 from datetime import datetime
 import asyncio
@@ -37,6 +37,8 @@ class StoreDatabase:
         """Initialize the store database."""
         self.logger.info(f"Initializing database {self.db_name}...")
         try:
+            self.cursor.execute("PRAGMA foreign_keys = ON;")
+            self.cursor.execute("PRAGMA journal_mode=WAL;")
             self.cursor.executescript("""
                 CREATE TABLE IF NOT EXISTS Store (
                     id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -53,6 +55,7 @@ class StoreDatabase:
                     archived INTEGER DEFAULT 0,
                     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_sent INTEGER DEFAULT 0,
                     store_id INTEGER NOT NULL,
                     FOREIGN KEY (store_id) REFERENCES Store (id)
                 );
@@ -86,7 +89,7 @@ class StoreDatabase:
 
     async def add_or_update_product(self, name: str, product_url: str, image_url: Optional[str],
                                      price_jpy: Optional[float], price_eur: Optional[float],
-                                     archived: int, store_name: str) -> Optional[str]:
+                                     archived: int, store_name: str) -> Tuple[str, Optional[ProductDataType]]:
         """
         Add or update a product in the database.
         Always updates last_seen and archived status.
@@ -95,42 +98,87 @@ class StoreDatabase:
         store_id: Optional[int] = self.add_store(store_name)
         if store_id is None:
             self.logger.error(f"Failed to find or create store {store_name}")
-            return "error"
+            return "error", None
 
         async with self.db_lock:
             try:
                 now = datetime.now()
-                # Check both URL and name
-                product: Optional[Row] = self.cursor.execute(
+                # Check image_url exists, to check if product exists in db
+                db_products: List[Row] = self.cursor.execute(
                     """
-                    SELECT id FROM Product
-                    WHERE (product_url = ? OR name = ?)
+                    SELECT id, name, product_url, image_url, price_jpy, price_eur
+                    FROM Product
+                    WHERE (image_url = ?)
                     AND store_id = ?
                     """,
-                    (product_url, name, store_id)
-                ).fetchone()
-
-                if product:
-                    product_id = product["id"]
+                    (image_url, store_id)
+                ).fetchall()
+                # Case 1: No products with this image_url exist - create new product
+                if not db_products:
                     self.cursor.execute("""
-                        UPDATE Product
-                        SET price_jpy = ?, price_eur = ?, image_url = ?,
-                            last_seen = ?, archived = ?
-                        WHERE id = ?
-                    """, (price_jpy, price_eur, image_url, now, archived, product_id))
-                    return "updated"
+                        INSERT INTO Product (name, product_url, image_url, price_jpy, price_eur, archived, store_id, first_seen, last_seen)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        (name, product_url, image_url, price_jpy, price_eur, archived, store_id, now, now))
+                    if self.cursor.lastrowid is None:
+                        self.logger.error(f"Failed to insert new product '{product_url}'")
+                        return "error", None
+                    new_product: ProductDataType = {
+                        "id": self.cursor.lastrowid,
+                        "name": name,
+                        "product_url": product_url,
+                        "image_url": image_url,
+                        "prices": {
+                            "JPY": price_jpy if price_jpy is not None else None,
+                            "EUR": price_eur if price_eur is not None else None
+                        }
+                    }
+                    return "new", new_product
 
+                # Case 2: Products with this image_url exist - check for matching product_url
+                matching_product = None
+                for product in db_products:
+                    if product["product_url"] == product_url:
+                        matching_product = product
+                        break
+
+                # Case 2a: No product with matching URL - create a new instance with same image
+                if matching_product is None:
+                    # check does product_url exist in the list, if not, insert and return update. if product_url exits, update the product and return updated
+                    # New product instance
+                    self.cursor.execute("""
+                        INSERT INTO Product (name, product_url, image_url, price_jpy, price_eur, archived, store_id, first_seen, last_seen)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        (name, product_url, image_url, price_jpy, price_eur, archived, store_id, now, now))
+                    if self.cursor.lastrowid is None:
+                        self.logger.error(f"Failed to insert new product '{product_url}'")
+                        return "error", None
+                    updated_product: ProductDataType = {
+                        "id": self.cursor.lastrowid,
+                        "name": name,
+                        "product_url": product_url,
+                        "image_url": image_url,
+                        "prices": {
+                            "JPY": price_jpy if price_jpy is not None else None,
+                            "EUR": price_eur if price_eur is not None else None
+                        }
+                    }
+                    return "updated", updated_product
+
+                # Updates but not alerts
+                # Case 2b: Found product with matching URL - update it
+                product_id = matching_product["id"]
                 self.cursor.execute("""
-                    INSERT INTO Product (name, product_url, image_url, price_jpy, price_eur,
-                                      archived, store_id, first_seen, last_seen)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (name, product_url, image_url, price_jpy, price_eur, archived,
-                     store_id, now, now))
-                return "new"
+                    UPDATE Product
+                    SET price_jpy = ?, price_eur = ?, archived = ?,
+                        last_seen = ?
+                    WHERE id = ?
+                """, (price_jpy, price_eur, archived, now, product_id))
+
+                return "", None
 
             except Error as e:
                 self.logger.error(f"Error adding/updating product '{product_url}': {e}")
-                return "error"
+                return "error", None
 
     def get_stores(self) -> List[StoreDataType]:
         """Get all stores from the database."""
@@ -180,16 +228,42 @@ class StoreDatabase:
             self.logger.error(f"Error fetching products for store '{store_name}': {e}")
             return []
 
-    async def sync_store_products(self, store_name: str, current_items: List[ProductDataType]) -> List[ProductDataType]:
+    async def get_unsent_products(self) -> List[ProductDataType]:
+        """Get all products that have not been sent."""
+        try:
+            products: List[Row] = self.cursor.execute(
+                "SELECT id, name, product_url, image_url, price_jpy, price_eur FROM Product WHERE is_sent = 0"
+            ).fetchall()
+
+            if not products:
+                return []
+
+            return [
+                {
+                    "id": product["id"],
+                    "name": product["name"],
+                    "product_url": product["product_url"],
+                    "image_url": product["image_url"],
+                    "prices": {
+                        "JPY": product["price_jpy"] if product["price_jpy"] != 0.0 else None,
+                        "EUR": product["price_eur"] if product["price_eur"] != 0.0 else None
+                    }
+                }
+                for product in products
+            ]
+        except Error as e:
+            self.logger.error(f"Error fetching unsent products: {e}")
+            return []
+
+    async def sync_store_products(self, store_name: str, current_items: List[ProductDataType]) -> Tuple[List[ProductDataType], List[ProductDataType]]:
         """
-        Update products in the database.
-        The archived status comes directly from the data.
-        Returns a list of newly added products.
+        Add new products to the database and update existing ones.
+        Returns a tuple of lists: (new_products, updated_products).
         """
         store_id: Optional[int] = self.add_store(store_name)
         if store_id is None:
             self.logger.error(f"Failed to find or create store {store_name}")
-            return []
+            return [], []
 
         # Check if this is the first fetch for the store
         initial_fetch: bool = self.cursor.execute(
@@ -204,8 +278,10 @@ class StoreDatabase:
             self.logger.info(f"First fetch for {store_name}. Skipping new product notifications.")
 
         new_products: List[ProductDataType] = []
+        updated_products: List[ProductDataType] = []
         for item in current_items:
             try:
+
                 name = item["name"].strip()
                 product_url = item["product_url"].strip()
                 image_url = str(item.get("image_url", "")).strip()
@@ -221,11 +297,7 @@ class StoreDatabase:
                 price_jpy = prices.get("JPY", None)
                 price_eur = prices.get("EUR", None)
 
-                if not name or not product_url:
-                    self.logger.warning(f"Skipping item with missing data: {item}")
-                    continue
-
-                product_status = await self.add_or_update_product(
+                product_status, product = await self.add_or_update_product(
                     name=name,
                     product_url=product_url,
                     image_url=image_url,
@@ -236,23 +308,18 @@ class StoreDatabase:
                 )
 
                 # Check if the product is new and not from the initial fetch
-                if product_status == "new" and not initial_fetch:
-                    new_item: ProductDataType = {
-                        "name": name,
-                        "product_url": product_url,
-                        "image_url": image_url,
-                        "prices": {
-                            "JPY": price_jpy if price_jpy is not None else None,
-                            "EUR": price_eur if price_eur is not None else None
-                        },
-                        "archived": archived
-                    }
-                    new_products.append(new_item)
+                if product_status == "new" and product and not initial_fetch:
+                    new_products.append(product)
+
+                # Check updated products
+                elif product_status == "updated" and product and not initial_fetch:
+                    updated_products.append(product)
+
 
             except Exception as e:
                 self.logger.error(f"Error processing item {item}: {e}")
 
-        return new_products
+        return (new_products, updated_products)
 
     async def mark_products_as_archived(self, store_name: str, urls: List[str]) -> None:
         """Mark specific products as archived based on their URLs."""
@@ -281,6 +348,18 @@ class StoreDatabase:
 
         except Error as e:
             self.logger.error(f"Error marking products as archived: {e}")
+            self.conn.rollback()
+
+    async def mark_product_as_sent(self, product_id: int) -> None:
+        """Mark a product as sent in db when product is posted."""
+        try:
+            self.cursor.execute(
+                "UPDATE Product SET is_sent = 1 WHERE id = ?",
+                (product_id,)
+            )
+            self.conn.commit()
+        except Error as e:
+            self.logger.error(f"Error marking product {product_id} as sent: {e}")
             self.conn.rollback()
 
     def delete_store(self, store_name: str) -> None:

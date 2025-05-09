@@ -4,7 +4,7 @@ A custom Discord bot designed for the Jirai sweeties server, combining chat func
 
 ## Project Information
 
-- **Version**: 1.7.2
+- **Version**: 1.8.2
 - **Author**: [yumeangelica](https://github.com/yumeangelica)
 - **License**: [CC BY-NC-ND 4.0](LICENSE.txt)
 - **Repository**: [Jirai sweeties](https://github.com/yumeangelica/jirai_sweeties)

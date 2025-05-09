@@ -10,3 +10,6 @@ venv/
 
 data/
 .vscode/
+
+raspberry_deploy.sh
+discord-bot.tar.gz
