@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, TypedDict, Union
+from typing import Dict, List, NotRequired, Optional, TypedDict, Union
 
 class StoreOptionsDataType(TypedDict):
     base_url: str
@@ -14,12 +14,18 @@ class StoreOptionsDataType(TypedDict):
     next_page_attribute: str
     delay_between_requests: int
     encoding: str
+    request_headers: NotRequired[Dict[str, str]]
+    proxy_url: NotRequired[str]
+    fetch_backend: NotRequired[str]
+    curl_impersonate: NotRequired[str]
+    request_timeout: NotRequired[float]
 
 class StoreConfigDataType(TypedDict):
     name: str
     name_format: str
     options: StoreOptionsDataType
     schedule: Dict[str, Union[List[int], str]]
+    run_on_start: NotRequired[bool]
 
 class StoreDataType(TypedDict):
     id: int

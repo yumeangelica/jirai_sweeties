@@ -27,19 +27,19 @@ class DiscordDatabase:
         self.db_lock = asyncio.Lock()
 
         try:
-            self.conn = connect(self.store_db_file_path, isolation_level=None)
+            self.conn = connect(self.store_db_file_path, isolation_level=None, timeout=30.0)
             self.conn.row_factory = Row
             self.cursor = self.conn.cursor()
             self.init_database()
-        except self.conn.Error as e:
-            self.logger.error(f"Failed to connect to the database: {e}")
-            self.logger.error(f"Error connecting to the database: {e}")
+        except Error as e:
+            self.logger.error(f"Failed to connect to the database {self.db_name}: {e}")
 
 
     def init_database(self) -> None:
         """Initialize the database."""
         try:
             self.logger.info(f"Initializing database {self.db_name}...")
+            self.cursor.execute("PRAGMA journal_mode=WAL;")
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS Users (
                     id INTEGER PRIMARY KEY NOT NULL,
@@ -68,7 +68,7 @@ class DiscordDatabase:
         try:
             self.logger.info(f"Adding user {username} to the database...")
             self.cursor.execute("""
-                INSERT INTO Users (id, username, created_at) VALUES (?, ?, ?)
+                INSERT OR IGNORE INTO Users (id, username, created_at) VALUES (?, ?, ?)
                 """, (user_id, username, datetime.now()))
             self.conn.commit()
             self.logger.info(f"User {username} ({user_id}) added to the database.")
@@ -83,24 +83,25 @@ class DiscordDatabase:
         """Get a user from the database."""
         try:
             self.logger.info(f"Getting user {user_id} from the database...")
-            user: DiscordUserDataType = self.cursor.execute("""
+            row: Optional[Row] = self.cursor.execute("""
                 SELECT * FROM Users WHERE id = ?
                 """, (user_id,)).fetchone()
 
-            if not user:
+            if not row:
                 self.logger.info(f"User {user_id} not found in the database.")
                 return None
 
+            # sqlite3.Row is immutable, so work on a plain dict copy
+            user_dict: DiscordUserDataType = dict(row)
+
             # Update username if it has changed
-            if user["username"] != username:
+            if user_dict["username"] != username:
                 self.logger.info(f"Updating username for user {user_id} in the database...")
                 self.cursor.execute("""
                     UPDATE Users SET username = ? WHERE id = ?
                     """, (username, user_id))
                 self.conn.commit()
-                user["username"] = username
-
-            user_dict: Optional[DiscordUserDataType] = user
+                user_dict["username"] = username
 
             self.logger.info(f"User {user_id} retrieved from the database.")
             return user_dict

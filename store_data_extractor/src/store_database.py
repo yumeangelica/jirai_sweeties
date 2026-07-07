@@ -26,10 +26,11 @@ class StoreDatabase:
         self.db_lock = asyncio.Lock()
 
         try:
-            self.conn = connect(self.store_db_file_name, isolation_level=None, check_same_thread=False)
+            self.conn = connect(self.store_db_file_name, isolation_level=None, check_same_thread=False, timeout=30.0)
             self.conn.row_factory = Row
             self.cursor = self.conn.cursor()
             self.init_database()
+            self.logger.info(f"Using SQLite database file: {self.store_db_file_name}")
         except Error as e:
             self.logger.error(f"Failed to connect to the database {self.db_name}: {e}")
 
@@ -38,6 +39,7 @@ class StoreDatabase:
         self.logger.info(f"Initializing database {self.db_name}...")
         try:
             self.cursor.execute("PRAGMA foreign_keys = ON;")
+            self.cursor.execute("PRAGMA busy_timeout = 30000;")
             self.cursor.execute("PRAGMA journal_mode=WAL;")
             self.cursor.executescript("""
                 CREATE TABLE IF NOT EXISTS Store (
@@ -89,11 +91,13 @@ class StoreDatabase:
 
     async def add_or_update_product(self, name: str, product_url: str, image_url: Optional[str],
                                      price_jpy: Optional[float], price_eur: Optional[float],
-                                     archived: int, store_name: str) -> Tuple[str, Optional[ProductDataType]]:
+                                     archived: int, store_name: str, mark_sent: bool = False) -> Tuple[str, Optional[ProductDataType]]:
         """
         Add or update a product in the database.
         Always updates last_seen and archived status.
         Checks both URL and name to determine if product exists.
+        With mark_sent=True new products are inserted as already sent (used on the
+        initial fetch so a fresh database never floods notification channels).
         """
         store_id: Optional[int] = self.add_store(store_name)
         if store_id is None:
@@ -116,9 +120,9 @@ class StoreDatabase:
                 # Case 1: No products with this image_url exist - create new product
                 if not db_products:
                     self.cursor.execute("""
-                        INSERT INTO Product (name, product_url, image_url, price_jpy, price_eur, archived, store_id, first_seen, last_seen)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                                        (name, product_url, image_url, price_jpy, price_eur, archived, store_id, now, now))
+                        INSERT INTO Product (name, product_url, image_url, price_jpy, price_eur, archived, store_id, first_seen, last_seen, is_sent)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        (name, product_url, image_url, price_jpy, price_eur, archived, store_id, now, now, int(mark_sent)))
                     if self.cursor.lastrowid is None:
                         self.logger.error(f"Failed to insert new product '{product_url}'")
                         return "error", None
@@ -146,9 +150,9 @@ class StoreDatabase:
                     # check does product_url exist in the list, if not, insert and return update. if product_url exits, update the product and return updated
                     # New product instance
                     self.cursor.execute("""
-                        INSERT INTO Product (name, product_url, image_url, price_jpy, price_eur, archived, store_id, first_seen, last_seen)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                                        (name, product_url, image_url, price_jpy, price_eur, archived, store_id, now, now))
+                        INSERT INTO Product (name, product_url, image_url, price_jpy, price_eur, archived, store_id, first_seen, last_seen, is_sent)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        (name, product_url, image_url, price_jpy, price_eur, archived, store_id, now, now, int(mark_sent)))
                     if self.cursor.lastrowid is None:
                         self.logger.error(f"Failed to insert new product '{product_url}'")
                         return "error", None
@@ -228,12 +232,23 @@ class StoreDatabase:
             self.logger.error(f"Error fetching products for store '{store_name}': {e}")
             return []
 
-    async def get_unsent_products(self) -> List[ProductDataType]:
-        """Get all products that have not been sent."""
+    async def get_unsent_products(self, store_name: Optional[str] = None) -> List[ProductDataType]:
+        """Get all products that have not been sent, optionally for a single store."""
         try:
-            products: List[Row] = self.cursor.execute(
-                "SELECT id, name, product_url, image_url, price_jpy, price_eur FROM Product WHERE is_sent = 0"
-            ).fetchall()
+            if store_name is not None:
+                products: List[Row] = self.cursor.execute(
+                    """
+                    SELECT p.id, p.name, p.product_url, p.image_url, p.price_jpy, p.price_eur
+                    FROM Product p
+                    JOIN Store s ON s.id = p.store_id
+                    WHERE p.is_sent = 0 AND s.name = ?
+                    """,
+                    (store_name,)
+                ).fetchall()
+            else:
+                products = self.cursor.execute(
+                    "SELECT id, name, product_url, image_url, price_jpy, price_eur FROM Product WHERE is_sent = 0"
+                ).fetchall()
 
             if not products:
                 return []
@@ -279,6 +294,11 @@ class StoreDatabase:
 
         new_products: List[ProductDataType] = []
         updated_products: List[ProductDataType] = []
+        inserted_count = 0
+        existing_count = 0
+        error_count = 0
+
+        self.logger.info(f"Syncing {len(current_items)} products for store {store_name}.")
         for item in current_items:
             try:
 
@@ -304,8 +324,16 @@ class StoreDatabase:
                     price_jpy=price_jpy,
                     price_eur=price_eur,
                     archived=int(archived),
-                    store_name=store_name
+                    store_name=store_name,
+                    mark_sent=initial_fetch
                 )
+
+                if product_status in ("new", "updated"):
+                    inserted_count += 1
+                elif product_status == "":
+                    existing_count += 1
+                else:
+                    error_count += 1
 
                 # Check if the product is new and not from the initial fetch
                 if product_status == "new" and product and not initial_fetch:
@@ -317,7 +345,13 @@ class StoreDatabase:
 
 
             except Exception as e:
+                error_count += 1
                 self.logger.error(f"Error processing item {item}: {e}")
+
+        self.logger.info(
+            f"Database sync complete for {store_name}: "
+            f"{inserted_count} inserted, {existing_count} existing/updated, {error_count} errors."
+        )
 
         return (new_products, updated_products)
 
