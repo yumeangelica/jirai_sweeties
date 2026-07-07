@@ -1,10 +1,10 @@
 ### Stage 1: Build environment with dependencies ###
-FROM python:3.12-alpine AS builder
+FROM python:3.14-alpine AS builder
 
 WORKDIR /app
 
 # Install build tools for packages with native extensions
-RUN apk add --no-cache build-base
+RUN apk add --no-cache build-base libffi-dev
 # Copy and install dependencies into user-local path
 COPY requirements.txt .
 RUN pip install --user --no-cache-dir -r requirements.txt
@@ -13,10 +13,13 @@ RUN pip install --user --no-cache-dir -r requirements.txt
 COPY . .
 
 ### Stage 2: Minimal runtime image ###
-FROM python:3.12-alpine
+FROM python:3.14-alpine
 
 # Create a non-root user
 RUN adduser -D appuser
+
+# Runtime libraries for native Python dependencies
+RUN apk add --no-cache libffi
 
 WORKDIR /app
 

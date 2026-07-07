@@ -6,7 +6,7 @@ import os
 import json
 from store_data_extractor.src.data_extractor import main_program
 from bot.discord_bot import DiscordBot
-from typing import Optional, List
+from typing import Dict, Optional, List
 from store_data_extractor.store_types import StoreConfigDataType, ProductDataType
 
 # Path to the stores configuration file
@@ -31,17 +31,31 @@ class StoreManager:
         self.db: StoreDatabase = StoreDatabase()
         self.user_agent_manager = user_agent_manager # only one instance of UserAgentManager, prevent multiple instances
         self._shutdown_event = asyncio.Event() # Event to signal shutdown
+        self._shutdown_started = False
+        self._stopped = False
         self.current_tasks: List[asyncio.Task] = []
+        self._store_locks: Dict[str, asyncio.Lock] = {} # Prevent concurrent runs for the same store
+
+    def get_store_lock(self, store_name: str) -> asyncio.Lock:
+        """Get (or create) the lock that serializes runs for a single store."""
+        if store_name not in self._store_locks:
+            self._store_locks[store_name] = asyncio.Lock()
+        return self._store_locks[store_name]
 
     async def start_session(self) -> None:
         """Start a new session."""
         self.logger.info("Starting session...")
+        self._stopped = False
         if not self.session:
             self.session: Optional[aiohttp.ClientSession] = aiohttp.ClientSession()
 
 
     async def stop_session(self) -> None:
         """Close the session."""
+        if self._stopped:
+            return
+
+        self._stopped = True
         self.logger.info("Stopping session...")
         if self.session:
             await self.session.close()
@@ -52,9 +66,12 @@ class StoreManager:
     async def schedule_runner(self, discord_bot: DiscordBot) -> None:
         """Manage store updates based on schedule."""
         await self.start_session()
+        await self.run_startup_tasks(discord_bot)
         try:
             while not self._shutdown_event.is_set():
-                await self.run_scheduled_tasks(discord_bot)
+                scheduled_count = await self.run_scheduled_tasks(discord_bot)
+                if scheduled_count == 0:
+                    self.logger.info("No stores scheduled at current time. Waiting for next check...")
                 try:
                     await asyncio.wait_for(self._shutdown_event.wait(), timeout=60)
                 except asyncio.TimeoutError:
@@ -64,16 +81,24 @@ class StoreManager:
         except Exception as e:
             self.logger.error(f"Error in schedule runner: {e}")
         finally:
-            await self.stop_session()
             await self.graceful_shutdown()
             await asyncio.sleep(0.1)
-            logging.shutdown()
 
+    async def run_startup_tasks(self, discord_bot: DiscordBot) -> None:
+        """Run stores configured to fetch immediately when the process starts."""
+        tasks = []
+        for store in self.stores or []:
+            if store.get("run_on_start", False):
+                self.logger.info(f"Running startup task for {store['name']}")
+                tasks.append(asyncio.create_task(self.fetch_store_data(discord_bot, store)))
 
-    async def run_scheduled_tasks(self, discord_bot: DiscordBot) -> None:
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def run_scheduled_tasks(self, discord_bot: DiscordBot) -> int:
         """Run the scheduled tasks for all stores."""
         tasks = []
-        for store in self.stores: # type: ignore
+        for store in self.stores or []:
             if await self.should_run_now(store):
                 self.logger.info(f"Scheduling task for {store['name']}")
                 tasks.append(asyncio.create_task(self.fetch_store_data(discord_bot, store)))
@@ -81,6 +106,8 @@ class StoreManager:
         # Run all tasks in parallel
         if tasks:
             await asyncio.gather(*tasks)
+
+        return len(tasks)
 
 
     async def should_run_now(self, store: StoreConfigDataType) -> bool:
@@ -113,19 +140,34 @@ class StoreManager:
         return True
 
 
-    async def fetch_unsent_products(self) -> Optional[List[ProductDataType]]:
-        """fetch unsent products from the database."""
-        products = await self.db.get_unsent_products()
+    async def fetch_unsent_products(self, store_name: str) -> Optional[List[ProductDataType]]:
+        """Fetch unsent products for a store from the database."""
+        products = await self.db.get_unsent_products(store_name)
         if not products or len(products) == 0:
             return None
         return products
 
+    def should_post_store_updates(self, discord_bot: DiscordBot) -> bool:
+        """Check whether store updates should be posted to Discord."""
+        bot_settings = getattr(discord_bot, "bot_settings", None)
+        if not bot_settings:
+            return True
+        return bot_settings.get("post_store_updates", True)
+
 
     async def fetch_store_data(self, discord_bot: DiscordBot, store: StoreConfigDataType) -> None:
         """Fetch and process store data with improved error handling."""
-        unsent_products = await self.fetch_unsent_products()
-        if unsent_products is not None:
-            await discord_bot.send_new_items(store['name_format'], unsent_products, "unsent")
+        async with self.get_store_lock(store['name']):
+            await self._fetch_store_data_locked(discord_bot, store)
+
+    async def _fetch_store_data_locked(self, discord_bot: DiscordBot, store: StoreConfigDataType) -> None:
+        """Fetch and process store data; caller must hold the store lock."""
+        try:
+            unsent_products = await self.fetch_unsent_products(store['name'])
+            if unsent_products is not None:
+                await discord_bot.send_new_items(store['name_format'], unsent_products, "unsent")
+        except Exception as e:
+            self.logger.error(f"Error sending unsent products for {store['name']}: {e}")
 
         async with SEMAPHORE:
             try:
@@ -133,13 +175,18 @@ class StoreManager:
                 if task:
                     self.current_tasks.append(task)
 
-                result = await main_program(self.session, store)
+                result = await main_program(self.session, store, self.db)
                 new_products, updated_products = result
 
                 if new_products:
                     await discord_bot.send_new_items(store['name_format'], new_products, "new")
                 if updated_products:
                     await discord_bot.send_new_items(store['name_format'], updated_products, "updated")
+
+                if not self.should_post_store_updates(discord_bot):
+                    unsent_products = await self.fetch_unsent_products(store['name'])
+                    if unsent_products is not None:
+                        await discord_bot.send_new_items(store['name_format'], unsent_products, "unsent")
 
             except asyncio.CancelledError:
                 self.logger.warning(f"Task cancelled for {store['name']}")
@@ -159,14 +206,18 @@ class StoreManager:
 
     async def graceful_shutdown(self) -> None:
         """Initiate graceful shutdown of all operations."""
-        if self._shutdown_event.is_set():
+        if self._shutdown_started:
             return
 
+        self._shutdown_started = True
         self._shutdown_event.set()
         self.logger.info("Initiating graceful shutdown...")
 
         # Cancel and wait for current tasks to complete
-        for task in self.current_tasks:
+        current_task = asyncio.current_task()
+        for task in list(self.current_tasks):
+            if task is current_task:
+                continue
             if not task.done():
                 task.cancel()
                 try:
@@ -179,5 +230,5 @@ class StoreManager:
 
     async def run_all_stores(self, discord_bot: DiscordBot) -> None:
         """Fetch data for all stores."""
-        for store in self.stores: # type: ignore
+        for store in self.stores or []:
             await self.fetch_store_data(discord_bot, store)

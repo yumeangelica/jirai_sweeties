@@ -4,7 +4,7 @@ A custom Discord bot designed for the Jirai sweeties server, combining chat func
 
 ## Project Information
 
-- **Version**: 1.8.3
+- **Version**: 1.9.0
 - **Author**: [yumeangelica](https://github.com/yumeangelica)
 - **License**: [CC BY-NC-ND 4.0](LICENSE.txt)
 - **Repository**: [Jirai sweeties](https://github.com/yumeangelica/jirai_sweeties)
@@ -28,7 +28,13 @@ This project consists of two main components:
 
 ### Deployment Environment
 
-The bot is containerized using Docker and currently runs locally on a Raspberry Pi device with Linux, providing a cost-effective and energy-efficient hosting solution.
+The bot is containerized using Docker and is intended to run on a Raspberry Pi with 64-bit Linux.
+
+The current Docker runtime is `python:3.14-alpine`. The scraper uses `curl_cffi`, which works in the tested `linux/arm64` image but does not currently build for `linux/arm/v7`. For Raspberry Pi 3 deployments, use a 64-bit OS and confirm the device reports `aarch64` with:
+
+```bash
+uname -m
+```
 
 ## Technical Implementation
 
@@ -91,6 +97,7 @@ stores.json
   {
     "name": "store_name",
     "name_format": "Formatted Store Name",
+    "run_on_start": true,
     "options": {
       "base_url": "base_url_for_data_extraction",
       "site_main_url": "main_site_url",
@@ -109,7 +116,8 @@ stores.json
       "next_page_selector_text": "Text_for_next_page_element",
       "next_page_attribute": "attribute_containing_next_page_url",
       "delay_between_requests": "time_in_seconds_between_requests",
-      "encoding": "character_encoding_used"
+      "encoding": "character_encoding_used",
+      "fetch_backend": "curl_cffi"
     },
     "schedule": {
       "minutes": "list_of_minutes_for_execution",
@@ -127,6 +135,7 @@ settings.json
 ```json
 {
   "new_items_channel_name": "channel_name_for_new_items",
+  "post_store_updates": true,
   "embed_color": "list of rgb values in format [R, G, B]",
   "welcome_channel_name": "channel_name_for_welcome_messages"
 }
@@ -136,6 +145,7 @@ settings.json
 Explanation of the fields in the stores.json file:
 - **name**: Unique identifier for the store.
 - **name_format**: User-friendly name for the store.
+- **run_on_start**: Optional. Runs the store fetch once when the process starts. Useful for backfills.
 - **options**: Configuration options for data extraction.
   - **base_url**: Starting URL for extracting data.
   - **site_main_url**: Main website URL.
@@ -152,6 +162,11 @@ Explanation of the fields in the stores.json file:
   - **next_page_attribute**: Attribute containing the next page URL.
   - **delay_between_requests**: Delay (in seconds) between requests.
   - **encoding**: Website's character encoding.
+  - **fetch_backend**: Optional. `auto`, `aiohttp`, or `curl_cffi`. Use `curl_cffi` for sites that block normal HTTP clients.
+  - **request_headers**: Optional. Additional HTTP headers to merge into scraper requests.
+  - **proxy_url**: Optional. Proxy URL for scraper requests.
+  - **curl_impersonate**: Optional. Browser profile for `curl_cffi`; defaults to `chrome`.
+  - **request_timeout**: Optional. Request timeout in seconds for `curl_cffi`; defaults to `30`.
 - **schedule**: Monitoring schedule.
   - **minutes**: Minute intervals.
   - **hours**: Hour intervals or `*` for every hour.
@@ -162,8 +177,27 @@ Explanation of the fields in the stores.json file:
 #### settings.json (required)
 Explanation of the fields in the settings.json file:
 - **new_items_channel_name**: Name of the channel where new items will be posted.
+- **post_store_updates**: Whether store update notifications should be posted to Discord. Defaults to `true` when omitted. Set to `false` for silent backfill/test runs; products are still marked as sent.
 - **embed_color**: RGB color for embedded messages (format: [R, G, B]).
 - **welcome_channel_name**: Name of the channel for welcome messages.
+
+### Silent Store Backfill
+
+Use silent backfill mode when testing scraper changes or filling the store database without posting product embeds to Discord.
+
+Set this in `bot/config/settings.json`:
+
+```json
+{
+  "post_store_updates": false
+}
+```
+
+When `post_store_updates` is `false`, store products are still saved to SQLite and marked as sent. This prevents a backlog from being posted later when Discord posting is enabled again.
+
+In addition, the very first fetch for a store (an empty or fresh `store_db.sqlite`) always inserts products as already sent, regardless of `post_store_updates`. A wiped database can therefore never flood the Discord channel with hundreds of old products — only products that appear after the initial fetch are posted.
+
+Set `run_on_start` to `true` in `store_data_extractor/config/stores.json` when the store should be fetched immediately on startup.
 
 #### user_agents.txt (required)
 
@@ -177,6 +211,10 @@ Explanation of the fields in the settings.json file:
 - Tracks the current user agent rotation
 - Created automatically by the system
 - Do not modify manually
+
+### Product images
+
+Product notifications include the item image. The store's image CDN blocks plain HTTP clients (including Discord's own image proxy) by TLS fingerprint, so a direct image URL in an embed renders empty. The bot therefore downloads each image with a browser impersonation (`curl_cffi`) and attaches the bytes to the message, so Discord hosts the image itself. If an image cannot be fetched, the product is still posted without an image.
 
 ### Store database
 
@@ -193,13 +231,74 @@ SQLite database is automatically created in the data directory, storing:
 
 - User information
 
+### Running with Docker
+
+Create a `.env` file with the bot token:
+
+```bash
+BOT_TOKEN=your_discord_bot_token
+```
+
+Build and run:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+The compose file targets `linux/arm64` for Raspberry Pi deployment. If the Raspberry Pi reports `armv7l`, install a 64-bit OS before deploying this version.
+
+### Deploying to Raspberry Pi
+
+The bot runs on a Raspberry Pi 3 with a 64-bit OS (verify with `uname -m` → `aarch64`). The image is built on the development machine and shipped to the Pi, because config files (`bot/config/`, `store_data_extractor/config/`) are intentionally not in Git and are baked into the image at build time.
+
+Before building, set production values in `bot/config/settings.json`: the real notification channel name and `"post_store_updates": true`. Changing these later requires a rebuild — only `./data` is volume-mounted. Make sure the bot role has View Channel, Send Messages and Embed Links permissions in the notification channel.
+
+Deployment steps (the local `raspberry_deploy.sh` script automates 1–4):
+
+1. Build the arm64 image locally: `docker buildx build --platform linux/arm64 -t discord-bot:latest --load .`
+2. Save it: `docker save discord-bot:latest | gzip > discord-bot.tar.gz`
+3. Copy the archive and `.env` to the Pi (`scp` into the project directory that contains `docker-compose.yml`).
+4. On the Pi: `gunzip -f discord-bot.tar.gz && docker image load -i discord-bot.tar`, then `docker compose up -d --no-build --pull never`.
+5. Follow the logs: `docker compose logs -f`.
+
+Handling `data/` on the Pi:
+
+- **Keep the Pi's `discord_db.sqlite`** — it contains the server's member records.
+- **Replace the Pi's `store_db.sqlite`** with an up-to-date copy from the development machine (`scp data/store_db.sqlite` into the Pi's `data/` while the container is stopped). This avoids re-posting products that were already announced.
+- Back up the old `data/` directory before replacing anything.
+- If `store_db.sqlite` is missing or empty, the first fetch fills it silently without posting (see Silent Store Backfill above) — the channel cannot be flooded.
+- Optional smoke test after deployment: delete one product row from `store_db.sqlite` and restart — exactly that product should be re-announced.
+
+### Development Checks
+
+Useful local checks:
+
+```bash
+python scripts/smoke_compile.py
+python scripts/smoke_first_run.py
+python scripts/smoke_scraper.py
+python scripts/smoke_silent_post.py
+python scripts/smoke_image_post.py
+```
+
+Docker smoke checks used for this version:
+
+```bash
+docker build -t jirai-sweeties:py314-smoke .
+docker run --rm jirai-sweeties:py314-smoke python scripts/smoke_compile.py
+docker run --rm jirai-sweeties:py314-smoke python scripts/smoke_scraper.py
+docker run --rm jirai-sweeties:py314-smoke python scripts/smoke_silent_post.py
+```
+
 ### Technology Stack
 
-- Python 3.12.0
+- Python 3.14 on Alpine Linux in Docker
 - Discord.py for bot functionality
 - SQLite3 for data storage
 - Lxml for web data extraction
 - aiohttp for async HTTP requests
+- curl_cffi for scraper requests that need browser impersonation
 - Additional dependencies listed in requirements.txt
 
 ## License and Copyright

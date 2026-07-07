@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+import aiohttp
 import certifi
 import logging
 import ssl
@@ -8,7 +9,10 @@ import json
 import os
 import sys
 import random
-from typing import List, Optional, Dict
+from io import BytesIO
+from urllib.parse import urlparse
+from curl_cffi import requests as curl_requests
+from typing import List, Optional, Dict, Tuple
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from bot.discord_types import DiscordUserDataType, BotSettingsDataType
@@ -25,18 +29,22 @@ WELCOME_MESSAGES_FILE_PATH = os.path.join(CONFIG_PATH, "welcome_messages.txt")
 
 class DiscordBot(commands.Bot):
     """Discord bot class to interact with the Discord API."""
-    def __init__(self) -> None:
+    def __init__(self, store_manager=None) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True # Enable the members intent for member join events
-        super().__init__(command_prefix='!', intents=intents)
 
         # Create SSL context with certifi
         self.ssl_context = ssl.create_default_context(cafile=certifi.where())
         self.ssl_context.verify_mode = ssl.CERT_REQUIRED
         self.ssl_context.check_hostname = True
+        connector = aiohttp.TCPConnector(ssl=self.ssl_context)
+
+        super().__init__(command_prefix='!', intents=intents, connector=connector)
+
         from store_data_extractor.store_manager import StoreManager # Lazy import to avoid circular imports
-        self.store_manager: StoreManager = StoreManager() # Store manager instance
+        # Share the caller's StoreManager (and its database connection) when provided
+        self.store_manager: StoreManager = store_manager if store_manager is not None else StoreManager()
         from bot.discord_database import DiscordDatabase # Lazy import to avoid circular imports
         self.discord_db = DiscordDatabase() # Discord database instance
         self.logger = logging.getLogger("DiscordBot") # Logger instance for the bot with the name "DiscordBot"
@@ -100,6 +108,35 @@ class DiscordBot(commands.Bot):
             return discord.Color.from_rgb(214, 140, 184)  # Default color
 
 
+    async def fetch_product_image(self, image_url: str) -> Optional[Tuple[bytes, str]]:
+        """Download a product image so it can be attached to the embed.
+
+        The store's image CDN blocks plain HTTP clients (including Discord's own
+        image proxy) by TLS fingerprint, so a direct embed URL renders empty.
+        Fetching it here with a browser impersonation and attaching the bytes
+        lets Discord host the image itself. Returns (bytes, filename) or None.
+        """
+        try:
+            response = await asyncio.to_thread(
+                curl_requests.get, image_url, impersonate="chrome", timeout=20
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch product image {image_url}: {e}")
+            return None
+
+        if response.status_code != 200 or not response.content:
+            self.logger.warning(f"Product image {image_url} returned HTTP {response.status_code}")
+            return None
+
+        max_image_bytes = 8 * 1024 * 1024  # Guard the Pi's memory against pathological responses
+        if len(response.content) > max_image_bytes:
+            self.logger.warning(f"Product image {image_url} too large ({len(response.content)} bytes), skipping")
+            return None
+
+        filename = os.path.basename(urlparse(image_url).path) or "product.jpg"
+        return response.content, filename
+
+
     async def send_new_items(self, store_name_format: str, unsent_products: List[ProductDataType], context: str) -> None:
         """Send new products to a specific Discord channel."""
         async with self.lock: # Ensure only one task can send messages at a time
@@ -110,18 +147,48 @@ class DiscordBot(commands.Bot):
                 self.logger.warning("Bot settings not found.")
                 return
 
+            if not unsent_products:
+                return
+
+            if not self.bot_settings.get("post_store_updates", True):
+                self.logger.info(f"Store update posting disabled. Marking {len(unsent_products)} {context} products as sent.")
+                for product in unsent_products:
+                    product_id = product.get("id") if product else None
+                    if product_id is None:
+                        self.logger.warning(f"Product ID is None for product: {product}, cannot mark product as sent")
+                        continue
+
+                    try:
+                        await self.store_manager.db.mark_product_as_sent(int(product_id))
+                    except (TypeError, ValueError) as e:
+                        self.logger.warning(f"Invalid product ID for product {product}: {e}")
+                return
+
+            # Channel cache is empty until the bot has logged in (startup tasks may get here first)
+            await self.wait_until_ready()
+
+            channel_name = self.bot_settings['new_items_channel_name'].lower()
+            substring_match = None
             for channel in self.get_all_channels():
-                if isinstance(channel, discord.TextChannel) and self.bot_settings['new_items_channel_name'].lower() in channel.name.lower():
-                    new_items_channel = channel
+                if not isinstance(channel, discord.TextChannel):
+                    continue
+                if channel.name.lower() == channel_name:
+                    new_items_channel = channel # Exact name match wins
                     break
+                if substring_match is None and channel_name in channel.name.lower():
+                    substring_match = channel
+
+            if new_items_channel is None:
+                new_items_channel = substring_match
 
             if not new_items_channel:
                 self.logger.warning(f"Channel '{self.bot_settings['new_items_channel_name']}' not found.")
                 return
 
-            if not unsent_products:
-                return
-
+            self.logger.info(
+                f"Posting {len(unsent_products)} {context} products to "
+                f"#{new_items_channel.name} (guild: {new_items_channel.guild.name})"
+            )
 
             # Fetch and validate embed color from settings
             embed_color: discord.Color = self.get_embed_color()
@@ -143,14 +210,15 @@ class DiscordBot(commands.Bot):
 
             # Send each product as a separate message
             for product in unsent_products:
-                product_id = str(product.get('id', None))
-                if product is None or product_id == None:
+                raw_product_id = product.get('id') if product else None
+                if raw_product_id is None:
                     self.logger.warning(f"Product ID is None for product: {product}, cannot send product")
                     continue
-                product_id = int(product_id)
+                product_id = int(raw_product_id)
                 name: str = str(product.get('name', 'No name available'))
                 product_url: str = str(product.get('product_url', '#'))
-                image_url: str | None = str(product.get('image_url', None))
+                raw_image_url = product.get('image_url')
+                image_url: Optional[str] = str(raw_image_url) if raw_image_url else None
 
                 raw_prices = product.get("prices", {})
                 prices: Dict[str, float] = {}
@@ -175,11 +243,19 @@ class DiscordBot(commands.Bot):
                     color=embed_color
                 )
 
+                # Attach the image as a file; a direct embed URL is blocked by the CDN
+                image_file: Optional[discord.File] = None
                 if image_url:
-                    embed.set_image(url=image_url)  # Set the product image
+                    fetched = await self.fetch_product_image(image_url)
+                    if fetched:
+                        content, filename = fetched
+                        image_file = discord.File(BytesIO(content), filename=filename)
+                        embed.set_image(url=f"attachment://{filename}")
 
-
-                await new_items_channel.send(embed=embed) # Send the message with the product details and image
+                if image_file is not None:
+                    await new_items_channel.send(embed=embed, file=image_file)
+                else:
+                    await new_items_channel.send(embed=embed)
 
                 await self.store_manager.db.mark_product_as_sent(product_id)
                 # Wait 0.5 sec between messages
