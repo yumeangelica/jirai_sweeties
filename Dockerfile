@@ -1,39 +1,36 @@
-### Stage 1: Build environment with dependencies ###
 FROM python:3.14-alpine AS builder
 
 WORKDIR /app
 
-# Install build tools for packages with native extensions
 RUN apk add --no-cache build-base libffi-dev
-# Copy and install dependencies into user-local path
-COPY requirements.txt .
-RUN pip install --user --no-cache-dir -r requirements.txt
+COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /bin/uv
 
-# Copy application source code
-COPY . .
+ENV UV_LINK_MODE=copy \
+    UV_NO_DEV=1 \
+    UV_PYTHON_DOWNLOADS=0
 
-### Stage 2: Minimal runtime image ###
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-install-project
+
 FROM python:3.14-alpine
-
-# Create a non-root user
-RUN adduser -D appuser
-
-# Runtime libraries for native Python dependencies
-RUN apk add --no-cache libffi
 
 WORKDIR /app
 
-# Copy application and installed dependencies from builder stage
-COPY --from=builder /app /app
-COPY --from=builder /root/.local /home/appuser/.local
+RUN apk add --no-cache libffi \
+    && adduser -D appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app
 
-# Set correct PATH so that user-installed packages are found
-ENV PATH=/home/appuser/.local/bin:$PATH
+COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
+COPY --chown=appuser:appuser bot ./bot
+COPY --chown=appuser:appuser store_data_extractor ./store_data_extractor
+COPY --chown=appuser:appuser utils ./utils
+COPY --chown=appuser:appuser __init__.py main_file.py run.py ./
 
-# Create a data directory and set permissions
-RUN mkdir -p /app/data && chown -R appuser /app /home/appuser
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
 
-# Switch to non-root user
 USER appuser
 
 CMD ["python", "run.py"]

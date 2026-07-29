@@ -1,7 +1,16 @@
 .env
 venv/
+.venv/
 **/__pycache__/
 __pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+.codenyan/
+.agents/
+.codex/
 .vscode
 .gitignore
 .git/
@@ -9,5 +18,7 @@ __pycache__/
 **/*.DS_Store
 README.md
 data/
+tests/
+scripts/
 raspberry_deploy.sh
 *.tar.gz

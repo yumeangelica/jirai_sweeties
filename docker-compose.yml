@@ -10,3 +10,8 @@ services:
       - .env  # Load environment variables from .env file
     restart: unless-stopped  # Restart the container unless it is explicitly stopped
     platform: linux/arm64  # Target platform for Raspberry Pi 3 B with 64-bit kernel
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

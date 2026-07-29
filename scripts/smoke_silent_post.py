@@ -18,6 +18,9 @@ class FakeStoreDatabase:
     async def mark_product_as_sent(self, product_id: int) -> None:
         self.sent_ids.append(product_id)
 
+    async def mark_products_as_sent(self, product_ids: list[int]) -> None:
+        self.sent_ids.extend(product_ids)
+
 
 async def run_smoke() -> None:
     fake_db = FakeStoreDatabase()

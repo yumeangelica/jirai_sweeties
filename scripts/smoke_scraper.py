@@ -4,7 +4,6 @@ import asyncio
 import json
 import sys
 
-import aiohttp
 from lxml import html
 
 
@@ -14,8 +13,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from store_data_extractor.src.data_extractor import (  # noqa: E402
     extract_items_by_config,
     get_body_element,
-    get_page_content,
+    try_get_page_content,
 )
+from store_data_extractor.src.http_client import HttpClientPool  # noqa: E402
 
 
 STORES_CONFIG_PATH = PROJECT_ROOT / "store_data_extractor" / "config" / "stores.json"
@@ -40,8 +40,17 @@ async def run_smoke(store_name: str | None) -> None:
     store = load_store(store_name)
     options = store["options"]
 
-    async with aiohttp.ClientSession() as session:
-        content = await get_page_content(options["base_url"], session, options)
+    clients = HttpClientPool(max_clients=1)
+    await clients.start([store])
+    try:
+        content = await try_get_page_content(
+            options["base_url"],
+            clients,
+            options,
+            max_retries=1,
+        )
+    finally:
+        await clients.close()
 
     if not content:
         raise RuntimeError(f"No content fetched for {store['name']}")

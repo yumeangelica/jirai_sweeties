@@ -5,7 +5,7 @@ def configure_logger() -> logging.Logger:
     Configure a root logger with a console handler and optional file handler.
     """
     logger: logging.Logger = logging.getLogger()  # Get the root logger
-    logger.setLevel(logging.DEBUG)  # Set global log level to DEBUG
+    logger.setLevel(logging.INFO)
 
     # Create console handler
     console_handler: logging.Handler = logging.StreamHandler()
