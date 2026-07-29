@@ -66,7 +66,8 @@ jirai_sweeties/
 ├── utils/
 │   ├── helpers.py                      # Helper functions for data directories
 │   └── logger.py                       # Logging functionality
-├── venv/                               # Python virtual environment
+├── tests/                              # Offline unittest regression tests
+├── .venv/                              # uv-managed Python virtual environment
 ├── .deployment                         # Deployment configuration
 ├── .dockerignore                       # Docker ignore file
 ├── .env                                # Environment variables
@@ -74,8 +75,9 @@ jirai_sweeties/
 ├── Dockerfile                          # Docker configuration
 ├── LICENSE.txt                         # Project license
 ├── main_file.py                        # Main script file
+├── pyproject.toml                      # Direct Python dependencies
+├── uv.lock                             # Locked dependency graph
 ├── README.md                           # Project documentation
-├── requirements.txt                    # Python dependencies
 └── run.py                              # Discord bot entry point
 ```
 
@@ -250,45 +252,60 @@ The compose file targets `linux/arm64` for Raspberry Pi deployment. If the Raspb
 
 ### Deploying to Raspberry Pi
 
-The bot runs on a Raspberry Pi 3 with a 64-bit OS (verify with `uname -m` → `aarch64`). The image is built on the development machine and shipped to the Pi, because config files (`bot/config/`, `store_data_extractor/config/`) are intentionally not in Git and are baked into the image at build time.
+The bot runs on a Raspberry Pi 3 with a 64-bit OS (verify with `uname -m` → `aarch64`). The arm64 image is built on the development machine and shipped to the Pi, because config files (`bot/config/`, `store_data_extractor/config/`) are intentionally not in Git and are baked into the image at build time.
 
-Before building, set production values in `bot/config/settings.json`: the real notification channel name and `"post_store_updates": true`. Changing these later requires a rebuild — only `./data` is volume-mounted. Make sure the bot role has View Channel, Send Messages and Embed Links permissions in the notification channel.
+Two scripts automate the whole process. `scripts/setup_pi_ssh.sh` is committed; `raspberry_deploy.sh` stays local (it holds your Pi's address) — copy it from an existing checkout or recreate it from the steps below.
 
-Deployment steps (the local `raspberry_deploy.sh` script automates 1–4):
+**One-time setup**
 
-1. Build the arm64 image locally: `docker buildx build --platform linux/arm64 -t discord-bot:latest --load .`
-2. Save it: `docker save discord-bot:latest | gzip > discord-bot.tar.gz`
-3. Copy the archive and `.env` to the Pi (`scp` into the project directory that contains `docker-compose.yml`).
-4. On the Pi: `gunzip -f discord-bot.tar.gz && docker image load -i discord-bot.tar`, then `docker compose up -d --no-build --pull never`.
-5. Follow the logs: `docker compose logs -f`.
+1. Set production values in `bot/config/settings.json`: the real `new_items_channel_name` and `"post_store_updates": true`. These are baked into the image, so changing them later needs a rebuild (only `./data` is volume-mounted). Give the bot role View Channel, Send Messages and Embed Links in that channel.
+2. Set up password-free SSH to the Pi (creates a key if needed, asks for the Pi password once):
 
-Handling `data/` on the Pi:
+   ```bash
+   PI_HOST=192.168.1.50 PI_USER=pi ./scripts/setup_pi_ssh.sh
+   ```
 
-- **Keep the Pi's `discord_db.sqlite`** — it contains the server's member records.
-- **Replace the Pi's `store_db.sqlite`** with an up-to-date copy from the development machine (`scp data/store_db.sqlite` into the Pi's `data/` while the container is stopped). This avoids re-posting products that were already announced.
-- Back up the old `data/` directory before replacing anything.
-- If `store_db.sqlite` is missing or empty, the first fetch fills it silently without posting (see Silent Store Backfill above) — the channel cannot be flooded.
-- Optional smoke test after deployment: delete one product row from `store_db.sqlite` and restart — exactly that product should be re-announced.
+**Every deploy**
+
+```bash
+./raspberry_deploy.sh            # build, ship, restart; replaces the Pi's store DB with the local one
+./raspberry_deploy.sh --logs     # ...and follow the bot logs afterwards
+./raspberry_deploy.sh --keep-db  # leave the Pi's store DB untouched
+./raspberry_deploy.sh --fresh-db # wipe the Pi's store DB (first fetch refills it silently)
+```
+
+The script runs all its checks (Docker, SSH key, Pi is `aarch64`, `.env` present) **before** touching the Pi, so it either completes or stops safely. It always backs up the Pi's `data/` to `data.backup.<timestamp>` first.
+
+**What happens to `data/` on the Pi**
+
+- The Pi's `discord_db.sqlite` (server member records) is always kept.
+- The default (`replace`) copies the local `store_db.sqlite` to the Pi, so already-announced products are not re-posted.
+- `--fresh-db` / a missing DB is safe: the first fetch fills it silently without posting (see Silent Store Backfill above) — the channel cannot be flooded.
+
+**Verify after deploy** — `./raspberry_deploy.sh --logs` (or `ssh <pi> 'cd ~/programs/jirai_sweeties && docker compose logs -f'`) and look for `Logged in as`, `Database sync complete`, no `403 Forbidden`, and no flood of products on the first fetch.
+
+**Manual fallback** (if you can't use the script): build with `docker buildx build --platform linux/arm64 -t discord-bot:latest --load .`, `docker save … | gzip > discord-bot.tar.gz`, `scp` the archive plus `.env` to the Pi, then on the Pi `gunzip -f discord-bot.tar.gz && docker image load -i discord-bot.tar && docker compose up -d --no-build --pull never`.
 
 ### Development Checks
 
 Useful local checks:
 
 ```bash
-python scripts/smoke_compile.py
-python scripts/smoke_first_run.py
-python scripts/smoke_scraper.py
-python scripts/smoke_silent_post.py
-python scripts/smoke_image_post.py
+uv sync --locked
+uv run --locked python -m unittest discover -s tests -v
+uv run --locked python scripts/smoke_compile.py
+uv run --locked python scripts/smoke_first_run.py
+uv run --locked python scripts/smoke_silent_post.py
+uv run --locked python scripts/smoke_scraper.py  # live store request; no DB or Discord writes
 ```
 
-Docker smoke checks used for this version:
+The production image intentionally excludes tests and scripts. Build it and verify imports
+without starting the bot:
 
 ```bash
-docker build -t jirai-sweeties:py314-smoke .
-docker run --rm jirai-sweeties:py314-smoke python scripts/smoke_compile.py
-docker run --rm jirai-sweeties:py314-smoke python scripts/smoke_scraper.py
-docker run --rm jirai-sweeties:py314-smoke python scripts/smoke_silent_post.py
+docker buildx build --platform linux/arm64 -t jirai-sweeties:py314-smoke --load .
+docker run --rm --entrypoint python jirai-sweeties:py314-smoke -c \
+  "import bot.discord_bot, store_data_extractor.src.data_extractor; print('imports passed')"
 ```
 
 ### Technology Stack
@@ -299,7 +316,7 @@ docker run --rm jirai-sweeties:py314-smoke python scripts/smoke_silent_post.py
 - Lxml for web data extraction
 - aiohttp for async HTTP requests
 - curl_cffi for scraper requests that need browser impersonation
-- Additional dependencies listed in requirements.txt
+- uv-managed dependencies declared in `pyproject.toml` and locked in `uv.lock`
 
 ## License and Copyright
 
