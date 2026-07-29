@@ -11,12 +11,12 @@ import sys
 import random
 from io import BytesIO
 from urllib.parse import urlparse
-from curl_cffi import requests as curl_requests
 from typing import List, Optional, Dict, Tuple
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from bot.discord_types import DiscordUserDataType, BotSettingsDataType
 from store_data_extractor.store_types import ProductDataType
+from store_data_extractor.src.http_client import HttpClientPool, HttpFetchError, ResponseTooLarge
 
 # Path to the config directory
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config")
@@ -116,25 +116,34 @@ class DiscordBot(commands.Bot):
         Fetching it here with a browser impersonation and attaching the bytes
         lets Discord host the image itself. Returns (bytes, filename) or None.
         """
+        max_image_bytes = 8 * 1024 * 1024
+        store_manager = getattr(self, "store_manager", None)
+        shared_clients = getattr(store_manager, "http_clients", None)
+        temporary_clients: Optional[HttpClientPool] = None
+        if shared_clients is None:
+            temporary_clients = HttpClientPool(max_clients=1)
+            await temporary_clients.start([])
+            shared_clients = temporary_clients
+
         try:
-            response = await asyncio.to_thread(
-                curl_requests.get, image_url, impersonate="chrome", timeout=20
+            content = await shared_clients.fetch_limited_bytes(
+                image_url,
+                max_bytes=max_image_bytes,
+                timeout=20,
+                impersonate="chrome",
             )
-        except Exception as e:
-            self.logger.warning(f"Failed to fetch product image {image_url}: {e}")
+        except ResponseTooLarge as error:
+            self.logger.warning(str(error))
             return None
-
-        if response.status_code != 200 or not response.content:
-            self.logger.warning(f"Product image {image_url} returned HTTP {response.status_code}")
+        except HttpFetchError as error:
+            self.logger.warning(f"Failed to fetch product image {image_url}: {error}")
             return None
-
-        max_image_bytes = 8 * 1024 * 1024  # Guard the Pi's memory against pathological responses
-        if len(response.content) > max_image_bytes:
-            self.logger.warning(f"Product image {image_url} too large ({len(response.content)} bytes), skipping")
-            return None
+        finally:
+            if temporary_clients is not None:
+                await temporary_clients.close()
 
         filename = os.path.basename(urlparse(image_url).path) or "product.jpg"
-        return response.content, filename
+        return content, filename
 
 
     async def send_new_items(self, store_name_format: str, unsent_products: List[ProductDataType], context: str) -> None:
@@ -152,6 +161,7 @@ class DiscordBot(commands.Bot):
 
             if not self.bot_settings.get("post_store_updates", True):
                 self.logger.info(f"Store update posting disabled. Marking {len(unsent_products)} {context} products as sent.")
+                product_ids: List[int] = []
                 for product in unsent_products:
                     product_id = product.get("id") if product else None
                     if product_id is None:
@@ -159,9 +169,10 @@ class DiscordBot(commands.Bot):
                         continue
 
                     try:
-                        await self.store_manager.db.mark_product_as_sent(int(product_id))
+                        product_ids.append(int(product_id))
                     except (TypeError, ValueError) as e:
                         self.logger.warning(f"Invalid product ID for product {product}: {e}")
+                await self.store_manager.db.mark_products_as_sent(product_ids)
                 return
 
             # Channel cache is empty until the bot has logged in (startup tasks may get here first)
