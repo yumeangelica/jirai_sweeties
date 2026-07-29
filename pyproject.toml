@@ -1,0 +1,27 @@
+[project]
+name = "jirai-sweeties"
+version = "1.9.0"
+requires-python = ">=3.14"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "aiohttp>=3.14.1",
+    "certifi>=2026.6.17",
+    "charset-normalizer>=3.4.9",
+    "cssselect>=1.4.0",
+    "curl-cffi>=0.15.0",
+    "discord-py>=2.7.1",
+    "lxml>=6.1.1",
+    "python-dotenv>=1.2.2",
+]
+
+[dependency-groups]
+dev = [
+    "types-aiofiles>=25.1.0.20260518",
+]
+
+[tool.uv]
+# rich is only imported by curl-cffi's CLI (curl_cffi/cli/), which this app
+# never runs; dropping it keeps rich+pygments+markdown-it out of the image.
+override-dependencies = [
+    "rich; sys_platform == 'never'",
+]

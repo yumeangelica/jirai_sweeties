@@ -13,3 +13,5 @@ data/
 
 raspberry_deploy.sh
 discord-bot.tar.gz
+.venv/
+.codenyan/
