@@ -86,14 +86,17 @@ async def main_run() -> None:
 
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         done, _ = await asyncio.wait(
-            {bot_task, shutdown_task},
+            {store_task, bot_task, shutdown_task},
             return_when=asyncio.FIRST_COMPLETED
         )
 
-        if bot_task in done:
-            await bot_task
-        else:
+        if shutdown_task in done:
             logger.info("Shutdown requested.")
+        elif bot_task in done:
+            await bot_task
+        elif store_task in done:
+            await store_task
+            raise RuntimeError("Store manager stopped unexpectedly")
 
     except asyncio.CancelledError:
         logger.info("Main task cancelled.")

@@ -3,85 +3,60 @@ import random
 from lxml import html
 from lxml.etree import XPathError
 from datetime import datetime
-from aiohttp import ClientResponseError, ClientSession
 from charset_normalizer import from_bytes
-from curl_cffi import requests as curl_requests
 from urllib.parse import urljoin
-import certifi
 import asyncio
-import ssl
 import logging
 import re
 from store_data_extractor.src.store_database import StoreDatabase
+from store_data_extractor.src.http_client import HttpClientPool, HttpFetchError
 from store_data_extractor.src.user_agent_manager import next_user_agent
 from store_data_extractor.store_types import StoreConfigDataType, StoreOptionsDataType, ProductDataType, ProductPricesDataType
 
 logger = logging.getLogger("DataExtractor")
 
-async def get_page_content(url: str, session: Any, store: StoreOptionsDataType) -> Optional[str]:
+async def get_page_content(url: str, clients: HttpClientPool, store: StoreOptionsDataType) -> str:
     """Fetch the HTML content of a page using a rotating user agent."""
     agent: str = await next_user_agent()
-    logger.info(f"Fetching page {url} with user agent: {agent}")
+    logger.info(f"Fetching page {url}")
+    logger.debug(f"Using user agent: {agent}")
 
     headers = build_request_headers(agent, store)
     fetch_backend = store.get("fetch_backend", "auto")
 
     if fetch_backend in ("auto", "aiohttp"):
-        content = await get_page_content_with_aiohttp(url, session, store, headers)
-        if content or fetch_backend == "aiohttp":
-            return content
+        try:
+            return await get_page_content_with_aiohttp(url, clients, store, headers)
+        except HttpFetchError as error:
+            if fetch_backend == "aiohttp":
+                raise
+            if error.status_code is not None and error.status_code != 403:
+                raise
+            logger.warning(f"{error}; falling back to curl_cffi")
 
     if fetch_backend in ("auto", "curl_cffi"):
-        return await get_page_content_with_curl_cffi(url, store, headers)
+        return await get_page_content_with_curl_cffi(url, clients, store, headers)
 
-    logger.error(f"Unsupported fetch_backend '{fetch_backend}' for {url}")
-    return None
+    raise HttpFetchError(
+        message=f"Unsupported fetch_backend '{fetch_backend}' for {url}",
+        retryable=False,
+    )
 
 async def get_page_content_with_aiohttp(
     url: str,
-    session: Any,
+    clients: HttpClientPool,
     store: StoreOptionsDataType,
     headers: dict[str, str],
-) -> Optional[str]:
-    try:
-        context = ssl.create_default_context(cafile=certifi.where())
-        proxy_url = store.get("proxy_url")
-
-        async with session.get(url, headers=headers, proxy=proxy_url, ssl=context) as response:
-            response.raise_for_status()
-            return decode_page_content(await response.read(), store)
-    except ClientResponseError as e:
-        logger.warning(f"aiohttp fetch failed for {url}: {e.status}, message='{e.message}'")
-    except Exception as e:
-        logger.warning(f"aiohttp fetch failed for {url}: {e}")
-
-    return None
+) -> str:
+    return decode_page_content(await clients.fetch_aiohttp_bytes(url, store, headers), store)
 
 async def get_page_content_with_curl_cffi(
     url: str,
+    clients: HttpClientPool,
     store: StoreOptionsDataType,
     headers: dict[str, str],
-) -> Optional[str]:
-    try:
-        return await asyncio.to_thread(fetch_page_with_curl_cffi, url, store, headers)
-    except Exception as e:
-        logger.error(f"curl_cffi fetch failed for {url}: {e}")
-        return None
-
-def fetch_page_with_curl_cffi(url: str, store: StoreOptionsDataType, headers: dict[str, str]) -> Optional[str]:
-    response = curl_requests.get(
-        url,
-        headers=headers,
-        impersonate=store.get("curl_impersonate", "chrome"),
-        proxy=store.get("proxy_url"),
-        timeout=store.get("request_timeout", 30),
-    )
-
-    if response.status_code >= 400:
-        logger.error(f"curl_cffi fetch failed for {url}: HTTP {response.status_code}")
-        return None
-
-    return decode_page_content(response.content, store)
+) -> str:
+    return decode_page_content(await clients.fetch_curl_bytes(url, store, headers), store)
 
 def decode_page_content(raw_content: bytes, store: StoreOptionsDataType) -> str:
     encoding = store.get("encoding", "utf-8")
@@ -116,16 +91,22 @@ def build_request_headers(agent: str, store: StoreOptionsDataType) -> dict[str, 
     return headers
 
 
-async def try_get_page_content(url: str, session: Any, store: StoreOptionsDataType, max_retries: int = 3) -> Optional[str]:
+async def try_get_page_content(
+    url: str,
+    clients: HttpClientPool,
+    store: StoreOptionsDataType,
+    max_retries: int = 3,
+) -> Optional[str]:
     """Try to get page content with retries."""
     for attempt in range(max_retries):
         try:
-            content = await get_page_content(url, session, store)
-            if content:
-                return content
-            logger.warning(f"Attempt {attempt + 1}/{max_retries} failed to get content from {url}")
-        except Exception as e:
-            logger.warning(f"Attempt {attempt + 1}/{max_retries} failed with error: {e}")
+            return await get_page_content(url, clients, store)
+        except HttpFetchError as error:
+            logger.warning(
+                f"Attempt {attempt + 1}/{max_retries} failed to get content from {url}: {error}"
+            )
+            if not error.retryable:
+                return None
 
         if attempt < max_retries - 1:
             await asyncio.sleep(5)  # Wait before retrying
@@ -236,11 +217,15 @@ def parse_product_details(product, config) -> Optional[ProductDataType]:
         logger.error(f"Error parsing product details: {e}")
         return None
 
-async def extract_items_by_config(tree: html.HtmlElement, config: StoreOptionsDataType) -> List[ProductDataType]:
-    """Extract product details from the HTML using store-specific configuration."""
+async def extract_items_with_status(
+    tree: html.HtmlElement,
+    config: StoreOptionsDataType,
+) -> Tuple[List[ProductDataType], bool]:
+    """Extract products and report whether every matched card parsed successfully."""
     try:
         products = select_values(tree, config["item_container_selector"])
         current_items: List[ProductDataType] = []
+        parse_complete = True
 
         for product in products:
             product_details = parse_product_details(product, config)
@@ -248,11 +233,19 @@ async def extract_items_by_config(tree: html.HtmlElement, config: StoreOptionsDa
                 sold_out = check_sold_out(product, config["sold_out_selector"]) if "sold_out_selector" in config else False
                 product_details["archived"] = sold_out
                 current_items.append(product_details)
+            else:
+                parse_complete = False
 
-        return current_items
+        return current_items, parse_complete
     except Exception as e:
         logger.error(f"Error extracting items: {e}")
-        return []
+        return [], False
+
+
+async def extract_items_by_config(tree: html.HtmlElement, config: StoreOptionsDataType) -> List[ProductDataType]:
+    """Extract product details from the HTML using store-specific configuration."""
+    current_items, _ = await extract_items_with_status(tree, config)
+    return current_items
 
 def check_sold_out(product, sold_out_selector) -> bool:
     """Check if a product is sold out."""
@@ -262,22 +255,20 @@ def check_sold_out(product, sold_out_selector) -> bool:
         logger.error(f"Invalid sold_out_selector: {e}")
         return False
 
-async def compare_with_database(database: StoreDatabase, store_name: str, current_urls: set[str]) -> set[str]:
-    """Compare current products with database and return URLs that should be archived."""
-    try:
-        db_products = await database.get_products(store_name)
-        db_urls = {p["product_url"] for p in db_products if not p.get("archived", False)}
-        to_archive = db_urls - current_urls # URLs in DB but not in current URLs
-        logger.info(f"Found {len(to_archive)} products to archive")
-        return to_archive
-    except Exception as e:
-        logger.error(f"Error comparing products with database: {e}")
-        return set()
-
-async def process_items(database: StoreDatabase, store_name: str, current_items: List[ProductDataType]) -> Tuple[List[ProductDataType], List[ProductDataType]]:
+async def process_items(
+    database: StoreDatabase,
+    store_name: str,
+    current_items: List[ProductDataType],
+    *,
+    crawl_complete: bool = True,
+) -> Tuple[List[ProductDataType], List[ProductDataType]]:
     """Save the items to the database and check for changes."""
     try:
-        result = await database.sync_store_products(store_name, current_items)
+        result = await database.sync_store_products(
+            store_name,
+            current_items,
+            crawl_complete=crawl_complete,
+        )
         new_products: List[ProductDataType]
         updated_products: List[ProductDataType]
         new_products, updated_products = result
@@ -286,12 +277,24 @@ async def process_items(database: StoreDatabase, store_name: str, current_items:
         logger.error(f"Error processing items for {store_name}: {e}")
         return [], []
 
-async def process_batch(database: StoreDatabase, store_name: str, items: List[ProductDataType], context: str = "") -> Tuple[List[ProductDataType], List[ProductDataType]]:
+async def process_batch(
+    database: StoreDatabase,
+    store_name: str,
+    items: List[ProductDataType],
+    context: str = "",
+    *,
+    crawl_complete: bool = True,
+) -> Tuple[List[ProductDataType], List[ProductDataType]]:
     """Process a batch of items with error handling."""
     if not items:
         return [], []
     try:
-        result = await process_items(database, store_name, items)
+        result = await process_items(
+            database,
+            store_name,
+            items,
+            crawl_complete=crawl_complete,
+        )
         new_products, updated_products = result
         if new_products:
             logger.info(f"Found {len(new_products)} new items{' ' + context if context else ''}")
@@ -304,39 +307,38 @@ async def process_batch(database: StoreDatabase, store_name: str, items: List[Pr
 
 async def get_next_page_url_by_config(tree: html.HtmlElement, store: StoreOptionsDataType) -> Optional[str]:
     """Identify the URL of the last 'Next' button based on the site configuration."""
-    try:
-        next_links = select_values(tree, store["next_page_selector"])
-        if not next_links:
-            logger.info(f"No next page link found for {store['base_url']}. Stopping pagination.")
-            return None
-
-        next_page_text = store.get("next_page_selector_text")
-        if next_page_text:
-            text_matches = [
-                next_link
-                for next_link in next_links
-                if next_page_text in (format_selector_value(next_link) or "")
-            ]
-            if text_matches:
-                next_links = text_matches
-
-        next_url = format_selector_value(next_links[-1], store.get("next_page_attribute", "href"))
-        if not next_url:
-            logger.info(f"No next page URL found for {store['base_url']}. Stopping pagination.")
-            return None
-        full_url = urljoin(store["site_main_url"], next_url)
-
-        return full_url
-    except Exception as e:
-        logger.error(f"Error finding next page for {store['base_url']}: {e}")
+    next_links = select_values(tree, store["next_page_selector"])
+    if not next_links:
+        logger.info(f"No next page link found for {store['base_url']}. Stopping pagination.")
         return None
 
-async def main_program(session: Optional[ClientSession], store: StoreConfigDataType, database: StoreDatabase) -> Tuple[List[ProductDataType], List[ProductDataType]]:
+    next_page_text = store.get("next_page_selector_text")
+    if next_page_text:
+        text_matches = [
+            next_link
+            for next_link in next_links
+            if next_page_text in (format_selector_value(next_link) or "")
+        ]
+        if text_matches:
+            next_links = text_matches
+
+    next_url = format_selector_value(next_links[-1], store.get("next_page_attribute", "href"))
+    if not next_url:
+        logger.info(f"No next page URL found for {store['base_url']}. Stopping pagination.")
+        return None
+    return urljoin(store["site_main_url"], next_url)
+
+async def main_program(
+    clients: HttpClientPool,
+    store: StoreConfigDataType,
+    database: StoreDatabase,
+) -> Tuple[List[ProductDataType], List[ProductDataType]]:
     """Main program to fetch and process data for a store."""
     url = store['options']['base_url']
     logger.info(f'Fetching data for {store["name"]} from {url} at {datetime.now()}')
 
     all_product_urls: set[str] = set()
+    all_items: List[ProductDataType] = []
     all_new_products: List[ProductDataType] = []
     all_updated_products: List[ProductDataType] = []
     visited_urls = set()
@@ -345,15 +347,19 @@ async def main_program(session: Optional[ClientSession], store: StoreConfigDataT
         current_url = store['options']["base_url"]
         success = True
 
-        # Phase 1: Process each page immediately and collect URLs
+        # Fetch and parse every reachable page before one database sync.
         while current_url:
             try:
                 if current_url in visited_urls:
-                    logger.info(f"URL already visited: {current_url}")
+                    logger.warning(
+                        f"Pagination cycle detected at {current_url}; "
+                        "treating the crawl as incomplete."
+                    )
+                    success = False
                     break
 
                 visited_urls.add(current_url)
-                html_content = await try_get_page_content(current_url, session, store=store['options'])
+                html_content = await try_get_page_content(current_url, clients, store=store['options'])
                 if not html_content:
                     logger.error(f"Failed to get content from {current_url} after 3 attempts")
                     success = False
@@ -362,21 +368,29 @@ async def main_program(session: Optional[ClientSession], store: StoreConfigDataT
                 tree = html.fromstring(html_content)
                 body = get_body_element(tree)
 
-                # Process items from this page
-                page_items = await extract_items_by_config(body, store['options'])
+                page_items, page_parse_complete = await extract_items_with_status(
+                    body,
+                    store['options'],
+                )
 
-                if page_items:
-                    # Update products for this page immediately
-                    result = await process_batch(database, store["name"], page_items, "from current page")
-                    new_products, updated_products = result
-                    if new_products:
-                        all_new_products.extend(new_products)
-                    if updated_products:
-                        all_updated_products.extend(updated_products)
+                if not page_items:
+                    logger.warning(
+                        f"No valid products parsed from {current_url}; "
+                        "treating the crawl as incomplete."
+                    )
+                    success = False
+                    break
 
-                    # Collect URLs for final comparison
-                    page_urls = {item["product_url"] for item in page_items}
-                    all_product_urls.update(page_urls)
+                all_items.extend(page_items)
+                page_urls = {item["product_url"] for item in page_items}
+                all_product_urls.update(page_urls)
+
+                if not page_parse_complete:
+                    logger.warning(
+                        f"Some product cards from {current_url} could not be parsed; "
+                        "the crawl will remain incomplete."
+                    )
+                    success = False
 
                 next_url = await get_next_page_url_by_config(body, store['options'])
                 if not next_url:
@@ -394,16 +408,19 @@ async def main_program(session: Optional[ClientSession], store: StoreConfigDataT
                 success = False
                 break
 
-        # Phase 2: Final check - only if all pages were processed successfully
-        if success and all_product_urls:
-            logger.info(f"All pages processed. Found total of {len(all_product_urls)} products.")
-            logger.info("Checking for products to archive...")
+        crawl_complete = success and bool(all_product_urls)
+        if all_items:
+            result = await process_batch(
+                database,
+                store["name"],
+                all_items,
+                "from current crawl",
+                crawl_complete=crawl_complete,
+            )
+            all_new_products, all_updated_products = result
 
-            # Compare with database and archive missing products
-            to_archive = await compare_with_database(database, store["name"], all_product_urls)
-            if to_archive:
-                await database.mark_products_as_archived(store["name"], list(to_archive))
-                logger.info(f"Marked {len(to_archive)} products as archived in final check")
+        if crawl_complete:
+            logger.info(f"All pages processed. Found total of {len(all_product_urls)} products.")
 
     except Exception as e:
         logger.error(f"Critical error in main_program for {store['name']}: {e}")
