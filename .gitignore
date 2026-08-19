@@ -9,6 +9,9 @@ config/
 venv/
 
 data/
+backups/
+.data-from-pi.*
+.data-before-pi-*
 .vscode/
 
 raspberry_deploy.sh

@@ -4,7 +4,7 @@ A custom Discord bot designed for the Jirai sweeties server, combining chat func
 
 ## Project Information
 
-- **Version**: 1.9.0
+- **Version**: 1.9.1
 - **Author**: [yumeangelica](https://github.com/yumeangelica)
 - **License**: [CC BY-NC-ND 4.0](LICENSE.txt)
 - **Repository**: [Jirai sweeties](https://github.com/yumeangelica/jirai_sweeties)
@@ -250,41 +250,41 @@ docker compose up -d
 
 The compose file targets `linux/arm64` for Raspberry Pi deployment. If the Raspberry Pi reports `armv7l`, install a 64-bit OS before deploying this version.
 
-### Deploying to Raspberry Pi
+### Raspberry Pi operations
 
-The bot runs on a Raspberry Pi 3 with a 64-bit OS (verify with `uname -m` → `aarch64`). The arm64 image is built on the development machine and shipped to the Pi, because config files (`bot/config/`, `store_data_extractor/config/`) are intentionally not in Git and are baked into the image at build time.
+The canonical, copy-pasteable Finnish guide is [Raspberry Pi -ajo-opas](docs/raspberry-pi-runbook.md). It covers backup, safe shutdown, OS reinstall, Docker setup, application restore, verification, later deploys, and manual fallback steps.
 
-Two scripts automate the whole process. `scripts/setup_pi_ssh.sh` is committed; `raspberry_deploy.sh` stays local (it holds your Pi's address) — copy it from an existing checkout or recreate it from the steps below.
+The important data rule is simple: the running container's `/app/data` mount is the source of truth. It can be either a legacy Docker named volume or the current `./data:/app/data` bind mount. Both databases use WAL mode, so never copy only a live `.sqlite` file; stop the writer and copy the complete mount.
 
-**One-time setup**
-
-1. Set production values in `bot/config/settings.json`: the real `new_items_channel_name` and `"post_store_updates": true`. These are baked into the image, so changing them later needs a rebuild (only `./data` is volume-mounted). Give the bot role View Channel, Send Messages and Embed Links in that channel.
-2. Set up password-free SSH to the Pi (creates a key if needed, asks for the Pi password once):
-
-   ```bash
-   PI_HOST=192.168.1.50 PI_USER=pi ./scripts/setup_pi_ssh.sh
-   ```
-
-**Every deploy**
+Set the Pi connection once per Terminal session:
 
 ```bash
-./raspberry_deploy.sh            # build, ship, restart; replaces the Pi's store DB with the local one
-./raspberry_deploy.sh --logs     # ...and follow the bot logs afterwards
-./raspberry_deploy.sh --keep-db  # leave the Pi's store DB untouched
-./raspberry_deploy.sh --fresh-db # wipe the Pi's store DB (first fetch refills it silently)
+export PI_HOST=192.168.1.50
+export PI_USER=pi
+export PI_DIR=programs/jirai_sweeties
 ```
 
-The script runs all its checks (Docker, SSH key, Pi is `aarch64`, `.env` present) **before** touching the Pi, so it either completes or stops safely. It always backs up the Pi's `data/` to `data.backup.<timestamp>` first.
+The normal commands are:
 
-**What happens to `data/` on the Pi**
+```bash
+./scripts/setup_pi_ssh.sh                         # one-time SSH key setup
+./scripts/backup_pi_data.sh --update-local        # verified backup; restart the Pi bot
+./scripts/backup_pi_data.sh --update-local \
+  --leave-stopped                                 # verified backup before shutdown
+./scripts/restore_pi_data.sh backups/pi-data-YYYYMMDD-HHMMSS --start
+./scripts/deploy_pi.sh --keep-db --logs           # safe/default later deploy
+```
 
-- The Pi's `discord_db.sqlite` (server member records) is always kept.
-- The default (`replace`) copies the local `store_db.sqlite` to the Pi, so already-announced products are not re-posted.
-- `--fresh-db` / a missing DB is safe: the first fetch fills it silently without posting (see Silent Store Backfill above) — the channel cannot be flooded.
+> [!WARNING]
+> Take a verified `backup_pi_data.sh --update-local` snapshot before the first deploy or any
+> reinstall. Never substitute `--replace-db` or `--fresh-db` for the normal `--keep-db` flow:
+> those options intentionally replace or remove Pi data.
 
-**Verify after deploy** — `./raspberry_deploy.sh --logs` (or `ssh <pi> 'cd ~/programs/jirai_sweeties && docker compose logs -f'`) and look for `Logged in as`, `Database sync complete`, no `403 Forbidden`, and no flood of products on the first fetch.
+`backup_pi_data.sh` discovers the real Docker mount, stops the bot during the copy, verifies both databases with `PRAGMA integrity_check`, writes SHA-256 checksums, and only then updates local `data/`. Its snapshot contains `remote-data/`, `SHA256SUMS`, and—when local data was updated—`local-data-before-update/`.
 
-**Manual fallback** (if you can't use the script): build with `docker buildx build --platform linux/arm64 -t discord-bot:latest --load .`, `docker save … | gzip > discord-bot.tar.gz`, `scp` the archive plus `.env` to the Pi, then on the Pi `gunzip -f discord-bot.tar.gz && docker image load -i discord-bot.tar && docker compose up -d --no-build --pull never`.
+`restore_pi_data.sh` only restores into a stopped container with an empty `/app/data`, verifies the result on the Pi, and starts the bot only after success. `deploy_pi.sh` keeps both Pi databases by default and creates a verified Mac snapshot before replacing an existing container. It refuses an implicit named-volume-to-bind-mount transition; perform that transition through the runbook's backup/reinstall/restore flow.
+
+`--replace-db` and `--fresh-db` are explicit database operations, not normal deploy options. Do not use either unless replacing or deleting the Pi's store database is intentional. Databases, `.env`, production config, and `backups/` are ignored by Git.
 
 ### Development Checks
 
